@@ -1,10 +1,13 @@
 import json
 from collections import deque
 import time
+import os
 
 import networkx as nx
 import matplotlib.pyplot as plt
 import concurrent.futures
+import textstat
+import pickle
 
 from adapters.OAI_Embeddings import OAIEmbedAdapter
 from similarity.cosine_similarity import similarity
@@ -26,14 +29,14 @@ from tree.node import RootNode, SyntacticNode, SemanticNode
 
 
 class Tree:
-    def __init__(self, root_prompt, adapter, perturbor):
+    def __init__(self, root_prompt, adapter, perturbor, prev_state=None):
         self.embed_model = OAIEmbedAdapter()
         self.root_prompt = root_prompt
         self.adapter = adapter
         self.perturbor = perturbor
         self.num_semantic = 0
         self.num_syntactic = 0
-        self.root = RootNode(root_prompt)
+        self.root = RootNode(root_prompt) if prev_state is None else prev_state["root"]
         self.root.embedding = self.embed_model.encode(root_prompt)
         wiki_data = retrieve_wiki_data(root_prompt)
         closest_match = find_most_relevant_page(
@@ -50,12 +53,12 @@ class Tree:
         self.root.bm25_closest_match = retrieve_bm25(
             bm25_retriever, root_prompt
         )
-        self.thresholds = []
-        self.prompt_list = [root_prompt]
-        self.time_semantic = 0
-        self.time_syntactic = 0
-        self.time_check = {}
-        self.metrics = {}
+        self.thresholds = [] if prev_state is None else prev_state["thresholds"]
+        self.prompt_list = [root_prompt] if prev_state is None else prev_state["prompt_list"]
+        self.time_semantic = 0 if prev_state is None else prev_state["time_semantic"]
+        self.time_syntactic = 0 if prev_state is None else prev_state["time_syntactic"]
+        self.time_check = {} if prev_state is None else prev_state["time_check"]
+        self.metrics = {} if prev_state is None else prev_state["metrics"]   
 
     def set_possible_answers(self, possible_answers):
         self.possible_answers = possible_answers
@@ -65,6 +68,14 @@ class Tree:
         self.num_semantic = num_semantic
         self.num_syntactic = num_syntactic
         self.thresholds = self.make_thresholds("linear", 1.0, 0.96, depth)
+        
+        # Calculate Flesch-Kincaid Grade Level and Dale-Chall Readability Score
+        fk_score = textstat.flesch_kincaid_grade(self.root.prompt)
+        dc_score = textstat.dale_chall_readability_score(self.root.prompt)
+        complexity_score = (fk_score + dc_score) / 2
+        self.root.complexity_score = complexity_score
+        self.root.fk_score = fk_score,
+        self.root.dc_score = dc_score
 
         queue = deque([(self.root, 0)])
 
@@ -166,6 +177,9 @@ class Tree:
         best_semantic_similarity = 0.0
         best_embedding = None
         best_root_similarity = float("inf")
+        fk_score = 0
+        dc_score = 0
+        complexity_score = 0
         while (
                 semantic_similarity_score > upper_thresh
                 or semantic_similarity_score < lower_thresh
@@ -180,15 +194,22 @@ class Tree:
             root_similarity_score = similarity(
                 root_embedding, sem_perturb_embedding
             )
+            # Calculate Flesch-Kincaid Grade Level and Dale-Chall Readability Score
+            fk_score = textstat.flesch_kincaid_grade(perturbation)
+            dc_score = textstat.dale_chall_readability_score(perturbation)
+            complexity_score = (fk_score + dc_score) / 2
 
             if root_similarity_score < best_root_similarity:
                 best_perturbation = perturbation
                 best_semantic_similarity = semantic_similarity_score
                 best_root_similarity = root_similarity_score
                 best_embedding = sem_perturb_embedding
+                best_fk_score = fk_score
+                best_dc_score = dc_score
+                best_complexity_score = complexity_score
 
             retry_count += 1
-
+    
         if best_perturbation is not None:
             wiki_data = retrieve_wiki_data(best_perturbation)
             closest_match = find_most_relevant_page(
@@ -213,6 +234,9 @@ class Tree:
                 rag_entities,
                 ner_entities,
                 parent=node,
+                fk_score=best_fk_score,
+                dc_score=best_dc_score,
+                complexity_score=best_complexity_score
             )
         else:
             wiki_data = retrieve_wiki_data(perturbation)
@@ -238,6 +262,9 @@ class Tree:
                 rag_entities,
                 ner_entities,
                 parent=node,
+                fk_score=fk_score,
+                dc_score=dc_score,
+                complexity_score=complexity_score
             )
 
         self.prompt_list.append(semantic_node.prompt)
@@ -906,6 +933,8 @@ class Tree:
                 "  " * level
                 + f"{node.id} - {node.prompt} - RAG({node.rag_closest_match})"
             )
+            if type(node) == SemanticNode:
+                print(print(f"complexity_score: {node.complexity_score}, dc_score: {node.dc_score}, fk_score: {node.fk_score}"))
             for model_name in node.answers:
                 print(
                     "  " * level
@@ -913,3 +942,28 @@ class Tree:
                 )
         for child in node.children:
             self.print_tree(child, level + 1, model_name)
+
+    def save_tree(self, file_path):
+        node = {
+            "root": self.root,
+            "thresholds": self.thresholds,
+            "prompt_list": self.prompt_list,
+            "time_semantic": self.time_semantic,
+            "time_syntactic": self.time_syntactic,
+            "time_check": self.time_check,
+            "metrics": self.metrics,
+            "root_prompt": self.root_prompt
+        }
+        dir = os.path.dirname(file_path)
+        if not os.path.exists(dir):
+            os.makedirs(dir) 
+        with open(file_path, "wb") as file:
+            pickle.dump(node, file)
+
+    @staticmethod
+    def load_tree(file_path, adapter, perturbor):
+        prev_state = {}
+        with open(file_path, "rb") as file:
+            prev_state = pickle.load(file)
+        root_prompt = prev_state["root_prompt"]
+        return Tree(root_prompt, adapter, perturbor, prev_state=prev_state) 

@@ -6,7 +6,7 @@ import textwrap
 import spacy
 
 from adapters.SemanticAdapter import SemanticAdapter
-
+from model.engine import GemmaAdapter
 from adapters.OAI_Embeddings import OAIEmbedAdapter
 
 from similarity.cosine_similarity import similarity
@@ -15,7 +15,9 @@ from langchain_core.documents import Document
 from transformers import AutoTokenizer, AutoModel
 
 embedding_adapter = OAIEmbedAdapter()
-llm_adapter = SemanticAdapter()
+model = GemmaAdapter("google/gemma-2-9b-it")
+llm_adapter = SemanticAdapter(model)
+
 NER = spacy.load(
     "en_core_web_trf"
 )
@@ -236,7 +238,6 @@ def display_result(
 
 def search_entities(prompt: str):
     input_text = search_query(prompt)
-    # print(input_text)
     answer = llm_adapter.wiki_rag_completions('gpt-3.5-turbo', input_text, prompt)
     return answer
 
@@ -274,7 +275,7 @@ class RAGAgent:
         self,
         **kwargs,
     ):
-        self.llm_adapter = SemanticAdapter()
+        self.llm_adapter = SemanticAdapter(model)
         self.query = None
 
     def answer_using_wiki(
