@@ -93,64 +93,106 @@ class Tree:
             )
 
             # Check perturbations concurrently
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                futures = [
-                    executor.submit(
-                        self.check_perturbation,
-                        node,
-                        perturbation,
-                        self.root.embedding,
-                        upper_thresh,
-                        low_thresh,
-                    )
-                    for perturbation in perturbations
-                ]
-                for future in concurrent.futures.as_completed(futures):
-                    semantic_node = future.result()
-                    node.add_child(semantic_node)
-                    queue.append((semantic_node, level + 1))
+            # with concurrent.futures.ThreadPoolExecutor() as executor:
+            #     futures = [
+            #         executor.submit(
+            #             self.check_perturbation,
+            #             node,
+            #             perturbation,
+            #             self.root.embedding,
+            #             upper_thresh,
+            #             low_thresh,
+            #         )
+            #         for perturbation in perturbations
+            #     ]
+            #     for future in concurrent.futures.as_completed(futures):
+            #         semantic_node = future.result()
+            #         node.add_child(semantic_node)
+            #         queue.append((semantic_node, level + 1))
+            # sem_time = time.time()
+            for perturbation in perturbations:
+                semantic_node = self.check_perturbation(
+                    node,
+                    perturbation,
+                    self.root.embedding,
+                    upper_thresh,
+                    low_thresh,
+                )
+                node.add_child(semantic_node)
+                queue.append((semantic_node, level + 1))
             sem_time = time.time()
-   
 
             # Create syntactic nodes concurrently
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                futures = [
-                    executor.submit(
-                        self.perturbor.syn_perturb,
-                        text=node.prompt,
-                        butterfinger=self.perturbor.butterfinger,
-                    )
-                    for _ in range(num_syntactic)
-                ]
-                for future in concurrent.futures.as_completed(futures):
-                    syn_perturb = future.result()
-                    wiki_data = retrieve_wiki_data(syn_perturb)
-                    closest_match = find_most_relevant_page(
-                        wiki_data=wiki_data, prompt=syn_perturb
-                    )
-                    rag_entities = search_entities(prompt=syn_perturb).split(
-                        ","
-                    )
-                    ner_entities = search_entities_NER(prompt=syn_perturb)
-                    rag_closest_match = closest_match
-                    contriever_closest_match = find_closest_contriever_match(
-                        wiki_data=wiki_data, prompt=syn_perturb
-                    )
-                    bm25_retriever = create_retriever(wiki_data)
-                    syntactic_node = SyntacticNode(
-                        syn_perturb,
-                        0.0,
-                        "test_context",
-                        parent=node,
-                        rag_closest_match=rag_closest_match,
-                        contriever_closest_match=contriever_closest_match,
-                        bm25_closest_match=retrieve_bm25(
-                            bm25_retriever, syn_perturb
-                        ),
-                        rag_entities=rag_entities,
-                        ner_entities=ner_entities,
-                    )
-                    node.add_child(syntactic_node)
+            # with concurrent.futures.ThreadPoolExecutor() as executor:
+            #     futures = [
+            #         executor.submit(
+            #             self.perturbor.syn_perturb,
+            #             text=node.prompt,
+            #             butterfinger=self.perturbor.butterfinger,
+            #         )
+            #         for _ in range(num_syntactic)
+            #     ]
+            #     for future in concurrent.futures.as_completed(futures):
+            #         syn_perturb = future.result()
+            #         wiki_data = retrieve_wiki_data(syn_perturb)
+            #         closest_match = find_most_relevant_page(
+            #             wiki_data=wiki_data, prompt=syn_perturb
+            #         )
+            #         rag_entities = search_entities(prompt=syn_perturb).split(
+            #             ","
+            #         )
+            #         ner_entities = search_entities_NER(prompt=syn_perturb)
+            #         rag_closest_match = closest_match
+            #         contriever_closest_match = find_closest_contriever_match(
+            #             wiki_data=wiki_data, prompt=syn_perturb
+            #         )
+            #         bm25_retriever = create_retriever(wiki_data)
+            #         syntactic_node = SyntacticNode(
+            #             syn_perturb,
+            #             0.0,
+            #             "test_context",
+            #             parent=node,
+            #             rag_closest_match=rag_closest_match,
+            #             contriever_closest_match=contriever_closest_match,
+            #             bm25_closest_match=retrieve_bm25(
+            #                 bm25_retriever, syn_perturb
+            #             ),
+            #             rag_entities=rag_entities,
+            #             ner_entities=ner_entities,
+            #         )
+            #         node.add_child(syntactic_node)
+            # syn_time = time.time()
+            for _ in range(num_syntactic):
+                syn_perturb = self.perturbor.syn_perturb(
+                    text=node.prompt,
+                    butterfinger=self.perturbor.butterfinger,
+                )
+                wiki_data = retrieve_wiki_data(syn_perturb)
+                closest_match = find_most_relevant_page(
+                    wiki_data=wiki_data, prompt=syn_perturb
+                )
+                rag_entities = search_entities(prompt=syn_perturb).split(",")
+                ner_entities = search_entities_NER(prompt=syn_perturb)
+                rag_closest_match = closest_match
+                contriever_closest_match = find_closest_contriever_match(
+                    wiki_data=wiki_data, prompt=syn_perturb
+                )
+                bm25_retriever = create_retriever(wiki_data)
+                syntactic_node = SyntacticNode(
+                    syn_perturb,
+                    0.0,
+                    "test_context",
+                    parent=node,
+                    rag_closest_match=rag_closest_match,
+                    contriever_closest_match=contriever_closest_match,
+                    bm25_closest_match=retrieve_bm25(
+                        bm25_retriever, syn_perturb
+                    ),
+                    rag_entities=rag_entities,
+                    ner_entities=ner_entities,
+                )
+                node.add_child(syntactic_node)
+
             syn_time = time.time()
 
         self.time_semantic = sem_time - start_time
