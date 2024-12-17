@@ -12,9 +12,7 @@ class Node:
         self.rag_entities = None
         self.ner_entities = None
         self.answers = {}
-        self.complexity_score=0,
-        self.fk_score=0,
-        self.dc_score=0
+        
 
     def add_child(self, child):
         child.id = f"{self.id}.{len(self.children)}"
@@ -22,10 +20,17 @@ class Node:
         child.parent = self
 
 class RootNode(Node):
-    def __init__(self, prompt):
+    def __init__(self,
+                 prompt,
+                 complexity_score=0,
+                 fk_score=0,
+                 dc_score=0):
         super().__init__("root", prompt, parent=None)
         self.id = "1"
         self.root_similarity_score = 1.0
+        self.complexity_score = complexity_score,
+        self.fk_score = fk_score,
+        self.dc_score = dc_score
     
     def to_dict(self):
         return {
@@ -41,7 +46,10 @@ class RootNode(Node):
             "rag_entities": self.rag_entities,
             "ner_entities": self.ner_entities,
             "answers": self.answers,
-            "root_similarity_score": self.root_similarity_score
+            "root_similarity_score": self.root_similarity_score,
+            "complexity_score": self.complexity_score,
+            "fk_score": self.fk_score,
+            "dc_score": self.dc_score
         }
 
 

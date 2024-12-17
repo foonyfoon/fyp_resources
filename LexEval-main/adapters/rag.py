@@ -7,6 +7,7 @@ import spacy
 
 from adapters.SemanticAdapter import SemanticAdapter
 from model.engine import GemmaAdapter
+# from model.engine import ClaudeAdapter
 from adapters.OAI_Embeddings import OAIEmbedAdapter
 
 from similarity.cosine_similarity import similarity
@@ -205,7 +206,13 @@ def search_query(prompt: str) -> str:
 def format_wiki_answer(prompt: str, title: str, extracts: str) -> str:
     extracts = extracts.replace("{", "")
     extracts = extracts.replace("}", "")
-    text = f"You are a helpful and honest assistant. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. You have retrieved the following extracts from the Wikipedia page {title}: {extracts}. You are expected to give truthful and concise answers based on the previous extracts. If it doesn't include relevant information for the request just say so and don't make up false information. "
+    text = " ".join(
+        [f"You are a helpful and honest assistant. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous,",
+        f"or illegal content. You have retrieved the following extracts from the Wikipedia page {title}: {extracts}.\nYou are expected to give ",
+        f"truthful and concise answers based on the previous extracts. If it doesn't include relevant information for the request just say so ",
+        f"and don't make up false information. \n",
+        f"Keep the answers as concise as possible, does not have to be full sentences. For example, for the question: What is Scooter Braun's occupation? Your response should be:",
+        f"Talent manager, Entrepreneur, Record executive, Film and television producer."])
     text = text.format(prompt=prompt, title=title, extracts=extracts)
     return text
 

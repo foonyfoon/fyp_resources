@@ -74,7 +74,7 @@ class Tree:
         dc_score = textstat.dale_chall_readability_score(self.root.prompt)
         complexity_score = (fk_score + dc_score) / 2
         self.root.complexity_score = complexity_score
-        self.root.fk_score = fk_score,
+        self.root.fk_score = fk_score
         self.root.dc_score = dc_score
 
         queue = deque([(self.root, 0)])
@@ -110,6 +110,7 @@ class Tree:
                     node.add_child(semantic_node)
                     queue.append((semantic_node, level + 1))
             sem_time = time.time()
+   
 
             # Create syntactic nodes concurrently
             with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -177,9 +178,10 @@ class Tree:
         best_semantic_similarity = 0.0
         best_embedding = None
         best_root_similarity = float("inf")
-        fk_score = 0
-        dc_score = 0
-        complexity_score = 0
+        # Calculate Flesch-Kincaid Grade Level and Dale-Chall Readability Score
+        fk_score = textstat.flesch_kincaid_grade(perturbation)
+        dc_score = textstat.dale_chall_readability_score(perturbation)
+        complexity_score = (fk_score + dc_score) / 2
         while (
                 semantic_similarity_score > upper_thresh
                 or semantic_similarity_score < lower_thresh
@@ -762,6 +764,13 @@ class Tree:
                 "false_neg": cont_false_negatives,
             },
         }
+        if isinstance(node, (RootNode, SemanticNode)):
+            node_semantic_complexity = {
+                "complexity_score": node.complexity_score,
+                "fk_score": node.fk_score,
+                "dc_score": node.dc_score,
+            }
+            values["semantic_scores"] = node_semantic_complexity
 
         return node.answers[model_name], values
 
@@ -792,28 +801,47 @@ class Tree:
             "base_rag": {"true_pos": 0, "false_pos": 0, "false_neg": 0},
             "bm25_rag": {"true_pos": 0, "false_pos": 0, "false_neg": 0},
             "contriever_rag": {"true_pos": 0, "false_pos": 0, "false_neg": 0},
-        }
+        }       
 
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            while queue:
-                batch = [
-                    queue.popleft() for _ in range(min(batch_size, len(queue)))
-                ]
-                futures = [
-                    executor.submit(self.process_node, node, model_name)
-                    for node in batch
-                ]
-                for future in concurrent.futures.as_completed(futures):
-                    answers, node_metrics = future.result()
-                    responses.append(answers["base"])
-                    base_rag_responses.append(answers["base_rag"])
-                    bm25_responses.append(answers["bm25_rag"])
-                    contriever_responses.append(answers["contriever_rag"])
-                    # Update the metrics
-                    for metric in metrics:
-                        metrics[metric]["true_pos"] += node_metrics[metric]["true_pos"]
-                        metrics[metric]["false_pos"] += node_metrics[metric]["false_pos"]
-                        metrics[metric]["false_neg"] += node_metrics[metric]["false_neg"]
+        # with concurrent.futures.ThreadPoolExecutor() as executor:
+        #     while queue:
+        #         batch = [
+        #             queue.popleft() for _ in range(min(batch_size, len(queue)))
+        #         ]
+        #         futures = [
+        #             executor.submit(self.process_node, node, model_name)
+        #             for node in batch
+        #         ]
+        #         for future in concurrent.futures.as_completed(futures):
+        #             answers, node_metrics = future.result()
+        #             responses.append(answers["base"])
+        #             base_rag_responses.append(answers["base_rag"])
+        #             bm25_responses.append(answers["bm25_rag"])
+        #             contriever_responses.append(answers["contriever_rag"])
+        #             # Update the metrics
+        #             for metric in metrics:
+        #                 metrics[metric]["true_pos"] += node_metrics[metric]["true_pos"]
+        #                 metrics[metric]["false_pos"] += node_metrics[metric]["false_pos"]
+        #                 metrics[metric]["false_neg"] += node_metrics[metric]["false_neg"]
+        while queue:
+            batch = [
+                queue.popleft() for _ in range(min(batch_size, len(queue)))
+            ]
+            for node in batch:
+                # Process the node sequentially
+                answers, node_metrics = self.process_node(node, model_name)
+                
+                # Append results
+                responses.append(answers["base"])
+                base_rag_responses.append(answers["base_rag"])
+                bm25_responses.append(answers["bm25_rag"])
+                contriever_responses.append(answers["contriever_rag"])
+                
+                # Update the metrics
+                for metric in metrics:
+                    metrics[metric]["true_pos"] += node_metrics[metric]["true_pos"]
+                    metrics[metric]["false_pos"] += node_metrics[metric]["false_pos"]
+                    metrics[metric]["false_neg"] += node_metrics[metric]["false_neg"]
 
         # Calculate accuracy and F1 score for each model
         for metric in metrics:
@@ -923,6 +951,8 @@ class Tree:
             node = self.root
         if type(node) == RootNode or type(node) == SyntacticNode:
             print("  " * level + f"{node.id} - {node.prompt}")
+            if type(node) == RootNode:
+                print(print(f"complexity_score: {node.complexity_score}, dc_score: {node.dc_score}, fk_score: {node.fk_score}"))
             for model_name in node.answers:
                 print(
                     "  " * level
