@@ -37,7 +37,7 @@ class SemanticAdapter:
         response, _ = self.model.complete(prompt)
         return response
 
-    def sem_check(self, question_prompt, model_name="gemma"):
+    def sem_check(self, question_prompt, model_name):
         prompt=self.model.format_prompt(
         question_prompt,
         state=[{

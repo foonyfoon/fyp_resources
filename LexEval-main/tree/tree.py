@@ -15,21 +15,13 @@ from similarity.cosine_similarity import similarity
 from rouge_score import rouge_scorer
 from nltk.translate.bleu_score import corpus_bleu
 
-from adapters.rag import (
-    retrieve_wiki_data,
-    find_most_relevant_page,
-    search_entities,
-    answer_using_wiki,
-    search_entities_NER,
-    find_closest_contriever_match,
-    create_retriever,
-    retrieve_bm25,
-)
+from adapters.rag import RAGAgent
 from tree.node import RootNode, SyntacticNode, SemanticNode
 
 
 class Tree:
-    def __init__(self, root_prompt, adapter, perturbor, prev_state=None):
+    def __init__(self, root_prompt, adapter, perturbor, rag, prev_state=None):
+        self.rag = rag
         self.embed_model = OAIEmbedAdapter()
         self.root_prompt = root_prompt
         self.adapter = adapter
@@ -38,19 +30,19 @@ class Tree:
         self.num_syntactic = 0
         self.root = RootNode(root_prompt) if prev_state is None else prev_state["root"]
         self.root.embedding = self.embed_model.encode(root_prompt)
-        wiki_data = retrieve_wiki_data(root_prompt)
-        closest_match = find_most_relevant_page(
+        wiki_data = self.rag.retrieve_wiki_data(root_prompt)
+        closest_match = self.rag.find_most_relevant_page(
             wiki_data=wiki_data, prompt=root_prompt
         )
-        contriever_closest_match = find_closest_contriever_match(
+        contriever_closest_match = self.rag.find_closest_contriever_match(
             wiki_data=wiki_data, prompt=root_prompt
         )
-        bm25_retriever = create_retriever(wiki_data)
-        self.rag_entities = search_entities(prompt=root_prompt).split(",")
-        self.ner_entities = search_entities_NER(prompt=root_prompt)
+        bm25_retriever = self.rag.create_retriever(wiki_data)
+        self.rag_entities = self.rag.search_entities(prompt=root_prompt).split(",")
+        self.ner_entities = self.rag.search_entities_NER(prompt=root_prompt)
         self.root.rag_closest_match = closest_match
         self.root.contriever_closest_match = contriever_closest_match
-        self.root.bm25_closest_match = retrieve_bm25(
+        self.root.bm25_closest_match = self.rag.retrieve_bm25(
             bm25_retriever, root_prompt
         )
         self.thresholds = [] if prev_state is None else prev_state["thresholds"]
@@ -167,17 +159,17 @@ class Tree:
                     text=node.prompt,
                     butterfinger=self.perturbor.butterfinger,
                 )
-                wiki_data = retrieve_wiki_data(syn_perturb)
-                closest_match = find_most_relevant_page(
+                wiki_data = self.rag.retrieve_wiki_data(syn_perturb)
+                closest_match = self.rag.find_most_relevant_page(
                     wiki_data=wiki_data, prompt=syn_perturb
                 )
-                rag_entities = search_entities(prompt=syn_perturb).split(",")
-                ner_entities = search_entities_NER(prompt=syn_perturb)
+                rag_entities = self.rag.search_entities(prompt=syn_perturb).split(",")
+                ner_entities = self.rag.search_entities_NER(prompt=syn_perturb)
                 rag_closest_match = closest_match
-                contriever_closest_match = find_closest_contriever_match(
+                contriever_closest_match = self.rag.find_closest_contriever_match(
                     wiki_data=wiki_data, prompt=syn_perturb
                 )
-                bm25_retriever = create_retriever(wiki_data)
+                bm25_retriever = self.rag.create_retriever(wiki_data)
                 syntactic_node = SyntacticNode(
                     syn_perturb,
                     0.0,
@@ -185,7 +177,7 @@ class Tree:
                     parent=node,
                     rag_closest_match=rag_closest_match,
                     contriever_closest_match=contriever_closest_match,
-                    bm25_closest_match=retrieve_bm25(
+                    bm25_closest_match=self.rag.retrieve_bm25(
                         bm25_retriever, syn_perturb
                     ),
                     rag_entities=rag_entities,
@@ -255,17 +247,17 @@ class Tree:
             retry_count += 1
     
         if best_perturbation is not None:
-            wiki_data = retrieve_wiki_data(best_perturbation)
-            closest_match = find_most_relevant_page(
+            wiki_data = self.rag.retrieve_wiki_data(best_perturbation)
+            closest_match = self.rag.find_most_relevant_page(
                 wiki_data=wiki_data, prompt=best_perturbation
             )
-            rag_entities = search_entities(prompt=best_perturbation).split(",")
+            rag_entities = self.rag.search_entities(prompt=best_perturbation).split(",")
             rag_closest_match = closest_match
-            ner_entities = search_entities_NER(prompt=best_perturbation)
-            contriever_closest_match = find_closest_contriever_match(
+            ner_entities = self.rag.search_entities_NER(prompt=best_perturbation)
+            contriever_closest_match = self.rag.find_closest_contriever_match(
                 wiki_data, best_perturbation
             )
-            bm25_retriever = create_retriever(wiki_data)
+            bm25_retriever = self.rag.create_retriever(wiki_data)
             semantic_node = SemanticNode(
                 best_perturbation,
                 best_semantic_similarity,
@@ -274,7 +266,7 @@ class Tree:
                 best_embedding,
                 rag_closest_match,
                 contriever_closest_match,
-                retrieve_bm25(bm25_retriever, best_perturbation),
+                self.rag.retrieve_bm25(bm25_retriever, best_perturbation),
                 rag_entities,
                 ner_entities,
                 parent=node,
@@ -283,17 +275,17 @@ class Tree:
                 complexity_score=best_complexity_score
             )
         else:
-            wiki_data = retrieve_wiki_data(perturbation)
-            closest_match = find_most_relevant_page(
+            wiki_data = self.rag.retrieve_wiki_data(perturbation)
+            closest_match = self.rag.find_most_relevant_page(
                 wiki_data=wiki_data, prompt=perturbation
             )
-            rag_entities = search_entities(prompt=perturbation).split(",")
+            rag_entities = self.rag.search_entities(prompt=perturbation).split(",")
             rag_closest_match = closest_match
-            ner_entities = search_entities_NER(prompt=perturbation)
-            contriever_closest_match = find_closest_contriever_match(
+            ner_entities = self.rag.search_entities_NER(prompt=perturbation)
+            contriever_closest_match = self.rag.find_closest_contriever_match(
                 wiki_data, perturbation
             )
-            bm25_retriever = create_retriever(wiki_data)
+            bm25_retriever = self.rag.create_retriever(wiki_data)
             semantic_node = SemanticNode(
                 perturbation,
                 semantic_similarity_score,
@@ -302,7 +294,7 @@ class Tree:
                 sem_perturb_embedding,
                 rag_closest_match,
                 contriever_closest_match,
-                retrieve_bm25(bm25_retriever, perturbation),
+                self.rag.retrieve_bm25(bm25_retriever, perturbation),
                 rag_entities,
                 ner_entities,
                 parent=node,
@@ -400,17 +392,18 @@ class Tree:
             response = self.adapter.sem_check(node.prompt, model_name)
 
             if node.rag_closest_match is not None:
-                base_rag_response = answer_using_wiki(
+                base_rag_response = self.rag.answer_using_wiki(
                     model_name,
                     node.prompt,
                     node.rag_closest_match["content"],
                     node.rag_closest_match["title"],
+                    
                 )
             else:
                 base_rag_response = "No answer"
 
             if node.bm25_closest_match is not None:
-                bm25_rag_response = answer_using_wiki(
+                bm25_rag_response = self.rag.answer_using_wiki(
                     model_name,
                     node.prompt,
                     node.bm25_closest_match[0].page_content,
@@ -420,7 +413,7 @@ class Tree:
                 bm25_rag_response = "No answer"
 
             if node.contriever_closest_match is not None:
-                contriever_response = answer_using_wiki(
+                contriever_response = self.rag.answer_using_wiki(
                     model_name,
                     node.prompt,
                     node.contriever_closest_match["text"]["content"],
@@ -696,21 +689,21 @@ class Tree:
         bm25_rag_response = "No answer"
         contriever_response = "No answer"
         if node.rag_closest_match is not None:
-            base_rag_response = answer_using_wiki(
+            base_rag_response = self.rag.answer_using_wiki(
                 model_name,
                 node.prompt,
                 node.rag_closest_match["content"],
                 node.rag_closest_match["title"],
             )
         if node.bm25_closest_match is not None:
-            bm25_rag_response = answer_using_wiki(
+            bm25_rag_response = self.rag.answer_using_wiki(
                 model_name,
                 node.prompt,
                 node.bm25_closest_match[0].page_content,
                 "",
             )
         if node.contriever_closest_match is not None:
-            contriever_response = answer_using_wiki(
+            contriever_response = self.rag.answer_using_wiki(
                 model_name,
                 node.prompt,
                 node.contriever_closest_match["text"]["content"],
@@ -1033,9 +1026,9 @@ class Tree:
             pickle.dump(node, file)
 
     @staticmethod
-    def load_tree(file_path, adapter, perturbor):
+    def load_tree(file_path, adapter, perturbor, rag):
         prev_state = {}
         with open(file_path, "rb") as file:
             prev_state = pickle.load(file)
         root_prompt = prev_state["root_prompt"]
-        return Tree(root_prompt, adapter, perturbor, prev_state=prev_state) 
+        return Tree(root_prompt, adapter, perturbor, rag, prev_state=prev_state) 
