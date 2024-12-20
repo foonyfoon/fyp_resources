@@ -29,10 +29,11 @@ def configure_logging(filename):
     )
 
 modelId ="google/gemma-2-9b-it"
-RETRY_COUNT = 5
+RETRY_COUNT = 3
 ERROR_THRESHOLD = 50
 DLQ = []  # Dead Letter Queue
 CHUNK_SIZE = 50
+dlq_file = "dlq.txt"
 intermediatory_tree_dir="/vol/bitbucket/lst20/treenodes/3_3_2/tree/"
 
 def process_with_retry(retry_count, index, row, model, semantic_adapter, syntactic_adapter, rag):
@@ -73,6 +74,7 @@ def process_with_retry(retry_count, index, row, model, semantic_adapter, syntact
             os.remove(tree_file_path)
         test_tree.print_tree()
         
+    # in case of OOM issues  
     except ValueError as err:
         if "Make sure you have enough GPU RAM" in str(err):
             logging.error(f"OOM; attempt {retry_count}: {err}")
@@ -99,7 +101,8 @@ def process_with_retry(retry_count, index, row, model, semantic_adapter, syntact
         model = GemmaAdapter(modelId)
         semantic_adapter = SemanticAdapter(model)
         syntactic_adapter = SyntacticPerturber()
-        process_with_retry(retry_count + 1, index, row, model, semantic_adapter, syntactic_adapter)
+        rag = RAGAgent(model)
+        process_with_retry(retry_count + 1, index, row, model, semantic_adapter, syntactic_adapter, rag)
 
 def get_tree_number(file_path):
     match = re.search(r'\d+', file_path)  # Finds the first occurrence of a number
@@ -177,14 +180,14 @@ if __name__ == "__main__":
         for index, row in df_chunk.iterrows():
             try:
                 process_with_retry(0, index, row, model, semantic_adapter, syntactic_adapter, rag)
-            except RuntimeError as err:
+            except Exception or RuntimeError as err:
                 if error_questions < ERROR_THRESHOLD:
                     error_questions += 1
-                    logging.info(f"Qeustion of index: {index} cannot be processed, adding to DLQ. {ERROR_THRESHOLD - error_questions} tries left")
-                    DLQ.append((index, row, str(err)))
+                    logging.info(f"Qeustion of index: {index} cannot be processed, adding to DLQ. {ERROR_THRESHOLD - error_questions} tries left. error: {err}")
+                    DLQ.append({"num": index, "err": err})
                 else:
                     logging.error(f"Error threshold reached. Question after index {index} will not be processed.")
-                    DLQ.append((index, row, str(err)))
+                    DLQ.append({"num": index, "err": err})
                     print("DLQ: ", DLQ)
                     raise err
             
@@ -192,3 +195,5 @@ if __name__ == "__main__":
     time_taken = time.strftime('%H:%M:%S', time.gmtime(end_time - start_time))
     logging.info(f"done! time to evaluate {end_idx - start_idx + 1} trees: {time_taken}")
     print(f"done! time to evaluate {end_idx - start_idx + 1} trees: {time_taken}")
+    print("DLQ: ", DLQ)
+
