@@ -1,9 +1,11 @@
 import json
+import ast
 from typing import List, Dict, Any, Tuple
 
 import wikipedia
 import textwrap
 import spacy
+import torch
 
 from adapters.SemanticAdapter import SemanticAdapter
 from adapters.OAI_Embeddings import OAIEmbedAdapter
@@ -29,14 +31,14 @@ class RAGAgent:
         self.tokenizer = AutoTokenizer.from_pretrained("facebook/contriever")
         self.model = AutoModel.from_pretrained("facebook/contriever")
 
-    def answer_using_wiki(
-        self, prompt: str, extracts: str, title: str, **kwargs
-    ) -> str:
-        input_text = self.format_wiki_answer(
-            prompt=prompt, title=title, extracts=extracts
-        )
-        answer = self.llm_adapter.wiki_rag_completions(input_text, prompt)
-        return answer
+    # def answer_using_wiki(
+    #     self, prompt: str, extracts: str, title: str, **kwargs
+    # ) -> str:
+    #     input_text = self.format_wiki_answer(
+    #         prompt=prompt, title=title, extracts=extracts
+    #     )
+    #     answer = self.llm_adapter.wiki_rag_completions(input_text, prompt)
+    #     return answer
 
 
     def create_embeddings(
@@ -71,6 +73,9 @@ class RAGAgent:
 
 
     def contriever_retriever(self, wiki_data):
+        '''
+        Computing the mean-pooled embedding across the non-padded tokens to get one vector per input.
+        '''
         if not wiki_data:
             return None
 
@@ -128,6 +133,31 @@ class RAGAgent:
                 closest_match = contriever_db[i][2]
         return closest_match
 
+    def find_top3_contriever_matches(self, wiki_data, prompt):
+        """
+        Return the top 3 pages (and their scores) with highest similarity to the prompt.
+        """
+        if not wiki_data:
+            return []
+        prompt_embedding = self.contriever_retriever(prompt)
+        contriever_db = self.create_contriever_db(wiki_data) # (f"embedding_id_{i}", embedding, {"text": wiki_data[i]})
+        
+ 
+        db_embeddings = [entry[1] for entry in contriever_db]
+        text_data = [entry[2]["text"] for entry in contriever_db]
+
+        # Convert the list of embeddings to a single Tensor of shape (N_wiki_data, d).
+        db_embeddings = torch.stack(db_embeddings, dim=0)
+        similarities = torch.matmul(db_embeddings, prompt_embedding.T)
+
+        k = (min(3,similarities.shape[0]))
+        top_values, top_indices = torch.topk(similarities.squeeze(), k)
+        top3_matches = [
+            (text_data[idx], float(top_values[i].item()))
+            for i, idx in enumerate(top_indices)
+        ]
+        return top3_matches
+
 
     def create_summary_db(
        self, wiki_data: List[Dict],
@@ -150,6 +180,7 @@ class RAGAgent:
         self, 
         wiki_data: List[Dict],
         prompt: str,
+        count=3
     ) -> Dict:
         if not wiki_data:
             return None
@@ -216,9 +247,33 @@ class RAGAgent:
         text = f'You are a helpful assistant whose job it is to extract entities from the given string. Do not attempt to answer the question, your job is just to perform named entity recognition. As a point of reference, these are (proper) nouns in the string. For example: Who released the song "Smells Like Teen Spirit"? should return Smells Like Teen Spirit'
         text = text.format(prompt=prompt)
         return text
+    
+    def search_query_2(self) -> List[str]:
+        text = (
+            f'You are a helpful assistant whose job is to extract named entities from the given string. '
+            f'Do not answer the question itself. Only return a comma-separated list of named entities. '
+            f'Example: "Which American born Sinclair won the Nobel Prize for Literature in 1930?" should '
+            'return a json of the following format: '
+            '{"res" : [("Sinclair", "Person"), ("Nobel Prize for Literature", "Award"), ("1930", "Date")]}'
+        )
+        return text
+
+    
+    def format_topk_wiki_answer(self, prompt: str, document_list: list) -> str:
+        excerpt = "\n".join(f'{doc[0]['title']}: {doc[0]['content'].replace("{", "").replace("}", "")}'for doc in document_list)
+        text = " ".join(
+            [f"You are a helpful and honest assistant. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous,",
+            f"or illegal content. You have retrieved the following extracts from the Wikipedia pages: \n{excerpt}.""\nYou are expected to give ",
+            f"truthful and concise answers based on the previous extracts. If it doesn't include relevant information for the request just say so ",
+            f"and don't make up false information. \n",
+            f"Keep the answers as concise as possible, does not have to be full sentences. For example, for the question: What is Scooter Braun's occupation? Your response should be:",
+            f"Talent manager, Entrepreneur, Record executive, Film and television producer."])
+        text = text.format(prompt=prompt, excerpt=excerpt)
+        return text
 
 
     def format_wiki_answer(self, prompt: str, title: str, extracts: str) -> str:
+        
         extracts = extracts.replace("{", "")
         extracts = extracts.replace("}", "")
         text = " ".join(
@@ -262,7 +317,24 @@ class RAGAgent:
         input_text = self.search_query(prompt)
         answer = self.llm_adapter.wiki_rag_completions('gpt-3.5-turbo', input_text, prompt)
         return answer
-
+    
+    def search_entities_2(self, prompt: str):
+        input_text = self.search_query_2()
+        answer = self.llm_adapter.wiki_rag_completions('gpt-3.5-turbo', input_text, prompt)
+        try:
+            dict_data = ast.literal_eval(answer)
+            if isinstance(dict_data, dict) and "res" in dict_data:
+                parsed_answer = dict_data["res"]
+                if isinstance(parsed_answer, list) and all(
+                                isinstance(item, tuple) and len(item) == 2 and
+                                isinstance(item[0], str) and isinstance(item[1], str)
+                                for item in parsed_answer
+                ):
+                    return parsed_answer
+            else:
+                raise ValueError("Parsed answer is not in the expected format (list of (str, str) tuples)")
+        except (SyntaxError, ValueError) as e:
+            raise ValueError(f"Failed to parse entity tuples from response: {answer}") from e
 
     def search_entities_NER(self, prompt: str):
         entity_list = self.NER(prompt)
@@ -270,21 +342,27 @@ class RAGAgent:
 
 
     def retrieve_wiki_data(self, prompt: str, **kwargs) -> List[Dict]:
-        # print(input_text)
+        # get entity in query
         answer = self.search_entities(prompt)
-        # print(answer)
-        # print("Searching for pages using query:", answer)
+        # get title, content (4000 characters), summary and page url of top 5 wiki pages
         wiki_data = self.get_wiki_data(query=answer)
-        # print(
-        #     "Retrieved pages:\n",
-        #     "\n".join([data["title"] for data in wiki_data]),
-        # )
+        return wiki_data
+    
+    def retrieve_wiki_data_2(self, prompt: str, **kwargs) -> List[Dict]:
+        # get entity in query
+        answers = self.search_entities_2(prompt)
+        # get title, content (4000 characters), summary and page url of top 5 wiki pages
+        wiki_data = []
+        for entity, _ in answers:
+            data = self.get_wiki_data(query=entity)
+            wiki_data.extend(data)
         return wiki_data
 
 
     def answer_using_wiki(
         self, model_name: str, prompt: str, extracts: str, title: str, **kwargs
     ) -> str:
+        # input text is the prompt hydrated with documents
         input_text = self.format_wiki_answer(
             prompt=prompt, title=title, extracts=extracts
         )
