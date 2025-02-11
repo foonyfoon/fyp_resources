@@ -2,10 +2,9 @@ import json
 from collections import deque
 import time
 import os
-
+import logging
 import networkx as nx
 import matplotlib.pyplot as plt
-import concurrent.futures
 import textstat
 import pickle
 
@@ -78,111 +77,19 @@ class Tree:
                 continue
 
             upper_thresh = 0.96
-            low_thresh = 0.8
+            lower_thresh = 0.8
 
-            perturbations = self.adapter.sem_perturb_combined(
-                node.prompt, num_semantic
-            )
-
-            # Check perturbations concurrently
-            # with concurrent.futures.ThreadPoolExecutor() as executor:
-            #     futures = [
-            #         executor.submit(
-            #             self.check_perturbation,
-            #             node,
-            #             perturbation,
-            #             self.root.embedding,
-            #             upper_thresh,
-            #             low_thresh,
-            #         )
-            #         for perturbation in perturbations
-            #     ]
-            #     for future in concurrent.futures.as_completed(futures):
-            #         semantic_node = future.result()
-            #         node.add_child(semantic_node)
-            #         queue.append((semantic_node, level + 1))
-            # sem_time = time.time()
-            for perturbation in perturbations:
-                semantic_node = self.check_perturbation(
-                    node,
-                    perturbation,
-                    self.root.embedding,
-                    upper_thresh,
-                    low_thresh,
-                )
+            # generate semantic children
+            for _ in range(self.num_semantic):
+                semantic_node = self.generate_semantic_node(node, upper_thresh, lower_thresh)
                 node.add_child(semantic_node)
+                # semantic node can have children
                 queue.append((semantic_node, level + 1))
             sem_time = time.time()
-
-            # Create syntactic nodes concurrently
-            # with concurrent.futures.ThreadPoolExecutor() as executor:
-            #     futures = [
-            #         executor.submit(
-            #             self.perturbor.syn_perturb,
-            #             text=node.prompt,
-            #             butterfinger=self.perturbor.butterfinger,
-            #         )
-            #         for _ in range(num_syntactic)
-            #     ]
-            #     for future in concurrent.futures.as_completed(futures):
-            #         syn_perturb = future.result()
-            #         wiki_data = retrieve_wiki_data(syn_perturb)
-            #         closest_match = find_most_relevant_page(
-            #             wiki_data=wiki_data, prompt=syn_perturb
-            #         )
-            #         rag_entities = search_entities(prompt=syn_perturb).split(
-            #             ","
-            #         )
-            #         ner_entities = search_entities_NER(prompt=syn_perturb)
-            #         rag_closest_match = closest_match
-            #         contriever_closest_match = find_closest_contriever_match(
-            #             wiki_data=wiki_data, prompt=syn_perturb
-            #         )
-            #         bm25_retriever = create_retriever(wiki_data)
-            #         syntactic_node = SyntacticNode(
-            #             syn_perturb,
-            #             0.0,
-            #             "test_context",
-            #             parent=node,
-            #             rag_closest_match=rag_closest_match,
-            #             contriever_closest_match=contriever_closest_match,
-            #             bm25_closest_match=retrieve_bm25(
-            #                 bm25_retriever, syn_perturb
-            #             ),
-            #             rag_entities=rag_entities,
-            #             ner_entities=ner_entities,
-            #         )
-            #         node.add_child(syntactic_node)
-            # syn_time = time.time()
+            
+            # generate syntactic children
             for _ in range(num_syntactic):
-                syn_perturb = self.perturbor.syn_perturb(
-                    text=node.prompt,
-                    butterfinger=self.perturbor.butterfinger,
-                )
-                wiki_data = self.rag.retrieve_wiki_data(syn_perturb)
-                closest_match = self.rag.find_most_relevant_page(
-                    wiki_data=wiki_data, prompt=syn_perturb
-                )
-                rag_entities = self.rag.search_entities(prompt=syn_perturb).split(",")
-                ner_entities = self.rag.search_entities_NER(prompt=syn_perturb)
-                rag_closest_match = closest_match
-                contriever_closest_match = self.rag.find_closest_contriever_match(
-                    wiki_data=wiki_data, prompt=syn_perturb
-                )
-                bm25_retriever = self.rag.create_retriever(wiki_data)
-                syntactic_node = SyntacticNode(
-                    syn_perturb,
-                    0.0,
-                    "test_context",
-                    parent=node,
-                    rag_closest_match=rag_closest_match,
-                    contriever_closest_match=contriever_closest_match,
-                    bm25_closest_match=self.rag.retrieve_bm25(
-                        bm25_retriever, syn_perturb
-                    ),
-                    rag_entities=rag_entities,
-                    ner_entities=ner_entities,
-                )
+                syntactic_node = self.generate_syntactic_node(node)
                 node.add_child(syntactic_node)
 
             syn_time = time.time()
@@ -192,119 +99,114 @@ class Tree:
         print("Time to create semantic nodes: ", sem_time - start_time)
         print("Time to create syntactic nodes: ", syn_time - sem_time)
         print("Total time: ", syn_time - start_time)
-
-    def check_perturbation(
-            self, node, perturbation, root_embedding, upper_thresh, lower_thresh
-    ):
-        sem_perturb_embedding = self.embed_model.encode(perturbation)
-        parent_root_similarity = node.root_similarity_score
-
-        root_similarity_score = similarity(
-            root_embedding, sem_perturb_embedding
+      
+    def generate_syntactic_node(self, node):
+        syn_perturb = self.perturbor.syn_perturb(
+                    text=node.prompt,
+                    butterfinger=self.perturbor.butterfinger,
+                )
+        wiki_data = self.rag.retrieve_wiki_data(syn_perturb)
+        closest_match = self.rag.find_most_relevant_page(
+            wiki_data=wiki_data, prompt=syn_perturb
         )
-
-        semantic_similarity_score = similarity(
-            node.embedding, sem_perturb_embedding
+        rag_entities = self.rag.search_entities(prompt=syn_perturb).split(",")
+        ner_entities = self.rag.search_entities_NER(prompt=syn_perturb)
+        rag_closest_match = closest_match
+        contriever_closest_match = self.rag.find_closest_contriever_match(
+            wiki_data=wiki_data, prompt=syn_perturb
         )
-
+        bm25_retriever = self.rag.create_retriever(wiki_data)
+        syntactic_node = SyntacticNode(
+            syn_perturb,
+            0.0,
+            "test_context",
+            parent=node,
+            rag_closest_match=rag_closest_match,
+            contriever_closest_match=contriever_closest_match,
+            bm25_closest_match=self.rag.retrieve_bm25(
+                bm25_retriever, syn_perturb
+            ),
+            rag_entities=rag_entities,
+            ner_entities=ner_entities,
+        )
+        return syntactic_node
+                
+    def generate_semantic_node(self, parent_node, upper_thresh, lower_thresh):
+        """
+        Generates a valid semantic perturbation and creates a SemanticNode.
+        """
+        root_embedding = self.root.embedding
+        original_prompt = parent_node.prompt
         retry_count = 0
-        best_perturbation = None
-        best_semantic_similarity = 0.0
-        best_embedding = None
-        best_root_similarity = float("inf")
+        max_retries = 5
+        # anything under 1 should be good; and quite similar: https://arxiv.org/pdf/2402.05201
+        max_temp = 0.7
+        is_valid = False
+        
+        current_prompt = original_prompt
+        parent_embedding = parent_node.embedding
+
+        while not is_valid and retry_count < max_retries:
+            # get perturbation (initial or retry with temperature)
+            temp = min(max_temp, 1.2 * ((1 + retry_count) / max_retries)) 
+            print(f"generate_semantic_node: retry at {retry_count} with temp={temp}")
+            perturbation = self.adapter.sem_perturb(current_prompt, prompt_list=self.prompt_list, temp=temp)
+            perturbation = perturbation.strip()
+
+            # calc embeddings and similarities
+            perturb_embedding = self.embed_model.encode(perturbation)
+            root_sim = similarity(root_embedding, perturb_embedding)
+            sem_sim = similarity(parent_embedding, perturb_embedding)
+
+            is_valid = (
+                # (lower_thresh <= sem_sim and sem_sim <= upper_thresh) and   # semantic similarity range check
+                # (parent_node.root_similarity_score < root_sim) and          # similarity distance check      
+                (perturbation not in self.prompt_list)                        # duplicate check
+            )
+
+            if is_valid:
+                self.prompt_list.append(perturbation)
+                break
+            else:
+                retry_count += 1
+                # move prompt to first in self.prompt_list to accomodate for "lost in the middle"
+                if perturbation in self.prompt_list: 
+                    self.prompt_list.remove(perturbation)
+                    self.prompt_list.insert(0, perturbation)
+        
+        if perturbation in self.prompt_list and retry_count >= max_retries:
+            raise RuntimeError(f"generate_semantic_node: could not generate a unique perturbation"
+                               f"after {retry_count} retries, of prompt list (len={len(self.prompt_list)}, list={self.prompt_list}, sem_sim={sem_sim})")
+
         # Calculate Flesch-Kincaid Grade Level and Dale-Chall Readability Score
         fk_score = textstat.flesch_kincaid_grade(perturbation)
         dc_score = textstat.dale_chall_readability_score(perturbation)
         complexity_score = (fk_score + dc_score) / 2
-        while (
-                semantic_similarity_score > upper_thresh
-                or semantic_similarity_score < lower_thresh
-                or (parent_root_similarity < root_similarity_score)
-                or perturbation in self.prompt_list
-        ) and retry_count < 5:
-            perturbation = self.adapter.sem_perturb(node.prompt)
-            sem_perturb_embedding = self.embed_model.encode(perturbation)
-            semantic_similarity_score = similarity(
-                node.embedding, sem_perturb_embedding
-            )
-            root_similarity_score = similarity(
-                root_embedding, sem_perturb_embedding
-            )
-            # Calculate Flesch-Kincaid Grade Level and Dale-Chall Readability Score
-            fk_score = textstat.flesch_kincaid_grade(perturbation)
-            dc_score = textstat.dale_chall_readability_score(perturbation)
-            complexity_score = (fk_score + dc_score) / 2
-
-            if root_similarity_score < best_root_similarity:
-                best_perturbation = perturbation
-                best_semantic_similarity = semantic_similarity_score
-                best_root_similarity = root_similarity_score
-                best_embedding = sem_perturb_embedding
-                best_fk_score = fk_score
-                best_dc_score = dc_score
-                best_complexity_score = complexity_score
-
-            retry_count += 1
-    
-        if best_perturbation is not None:
-            wiki_data = self.rag.retrieve_wiki_data(best_perturbation)
-            closest_match = self.rag.find_most_relevant_page(
-                wiki_data=wiki_data, prompt=best_perturbation
-            )
-            rag_entities = self.rag.search_entities(prompt=best_perturbation).split(",")
-            rag_closest_match = closest_match
-            ner_entities = self.rag.search_entities_NER(prompt=best_perturbation)
-            contriever_closest_match = self.rag.find_closest_contriever_match(
-                wiki_data, best_perturbation
-            )
-            bm25_retriever = self.rag.create_retriever(wiki_data)
-            semantic_node = SemanticNode(
-                best_perturbation,
-                best_semantic_similarity,
-                best_root_similarity,
-                lower_thresh,
-                best_embedding,
-                rag_closest_match,
-                contriever_closest_match,
-                self.rag.retrieve_bm25(bm25_retriever, best_perturbation),
-                rag_entities,
-                ner_entities,
-                parent=node,
-                fk_score=best_fk_score,
-                dc_score=best_dc_score,
-                complexity_score=best_complexity_score
-            )
-        else:
-            wiki_data = self.rag.retrieve_wiki_data(perturbation)
-            closest_match = self.rag.find_most_relevant_page(
-                wiki_data=wiki_data, prompt=perturbation
-            )
-            rag_entities = self.rag.search_entities(prompt=perturbation).split(",")
-            rag_closest_match = closest_match
-            ner_entities = self.rag.search_entities_NER(prompt=perturbation)
-            contriever_closest_match = self.rag.find_closest_contriever_match(
-                wiki_data, perturbation
-            )
-            bm25_retriever = self.rag.create_retriever(wiki_data)
-            semantic_node = SemanticNode(
-                perturbation,
-                semantic_similarity_score,
-                root_similarity_score,
-                lower_thresh,
-                sem_perturb_embedding,
-                rag_closest_match,
-                contriever_closest_match,
-                self.rag.retrieve_bm25(bm25_retriever, perturbation),
-                rag_entities,
-                ner_entities,
-                parent=node,
-                fk_score=fk_score,
-                dc_score=dc_score,
-                complexity_score=complexity_score
-            )
-
-        self.prompt_list.append(semantic_node.prompt)
-        return semantic_node
+        
+        wiki_data = self.rag.retrieve_wiki_data(perturbation)
+        closest_match = self.rag.find_most_relevant_page(wiki_data, perturbation)
+        rag_entities = self.rag.search_entities(perturbation).split(",")
+        ner_entities = self.rag.search_entities_NER(perturbation)
+        contriever_match = self.rag.find_closest_contriever_match(wiki_data, perturbation)
+        bm25_retriever = self.rag.create_retriever(wiki_data)
+        bm25_match = self.rag.retrieve_bm25(bm25_retriever, perturbation)
+        
+        return SemanticNode(
+            perturbation,
+            sem_sim,
+            root_sim,
+            lower_thresh,
+            self.embed_model.encode(perturbation),
+            closest_match,
+            contriever_match,
+            bm25_match,
+            rag_entities,
+            ner_entities,
+            parent=parent_node,
+            fk_score=fk_score,
+            dc_score=dc_score,
+            complexity_score=complexity_score
+        )  
 
     def evaluate(self):
         queue = []
@@ -837,27 +739,6 @@ class Tree:
             "bm25_rag": {"true_pos": 0, "false_pos": 0, "false_neg": 0},
             "contriever_rag": {"true_pos": 0, "false_pos": 0, "false_neg": 0},
         }       
-
-        # with concurrent.futures.ThreadPoolExecutor() as executor:
-        #     while queue:
-        #         batch = [
-        #             queue.popleft() for _ in range(min(batch_size, len(queue)))
-        #         ]
-        #         futures = [
-        #             executor.submit(self.process_node, node, model_name)
-        #             for node in batch
-        #         ]
-        #         for future in concurrent.futures.as_completed(futures):
-        #             answers, node_metrics = future.result()
-        #             responses.append(answers["base"])
-        #             base_rag_responses.append(answers["base_rag"])
-        #             bm25_responses.append(answers["bm25_rag"])
-        #             contriever_responses.append(answers["contriever_rag"])
-        #             # Update the metrics
-        #             for metric in metrics:
-        #                 metrics[metric]["true_pos"] += node_metrics[metric]["true_pos"]
-        #                 metrics[metric]["false_pos"] += node_metrics[metric]["false_pos"]
-        #                 metrics[metric]["false_neg"] += node_metrics[metric]["false_neg"]
         while queue:
             batch = [
                 queue.popleft() for _ in range(min(batch_size, len(queue)))
@@ -1031,4 +912,5 @@ class Tree:
         with open(file_path, "rb") as file:
             prev_state = pickle.load(file)
         root_prompt = prev_state["root_prompt"]
-        return Tree(root_prompt, adapter, perturbor, rag, prev_state=prev_state) 
+        return Tree(root_prompt, adapter, perturbor, rag, prev_state=prev_state)
+

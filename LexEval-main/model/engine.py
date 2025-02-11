@@ -63,15 +63,15 @@ class GemmaAdapter(LLMAdapter):
                                  model=self.model,
                                  tokenizer=self.tokenizer,
                                  pad_token_id=self.tokenizer.eos_token_id,
-                                 max_new_tokens=256,
-                                 )
+                                 max_new_tokens=256
+                                )
 
     def format_prompt(self, utterance: str, state: List[Dict[str, str]] = None, role='user', **kwargs):
         prompt = []
         instr = ""
         if state is not None:
             instr += "Here are the guidelines for answering questions: \n"
-            instr += "\n".join(f"{i + 1}. {s['content']}" for i, s in enumerate(state))
+            instr += "\n".join(f"{s['content']}" for i, s in enumerate(state))
             instr += "\nNow, here is the question you need to answer: \n"
         instr += utterance
         prompt.append({
@@ -81,8 +81,12 @@ class GemmaAdapter(LLMAdapter):
         return prompt
 
     def complete(self, prompt: List[Dict[str, str]], **kwargs):
-        with torch.no_grad():
-            obj_response = self.pipeline(prompt)
+        temperature = kwargs.get('temperature', None)  # Default beam search instead of sampling
+        with torch.no_grad(): 
+            if temperature is not None:
+                obj_response = self.pipeline(prompt, temperature=temperature, do_sample=True)
+            else:
+                obj_response = self.pipeline(prompt)
             response = obj_response[0]['generated_text']
             if type(response) is list:
                 response = response[-1]['content']
