@@ -7,8 +7,8 @@ class Node:
         self.children = []
         self.embedding = None
         self.rag_closest_match = None
-        self.contriever_closest_match = None
-        self.bm25_closest_match = None
+        # self.contriever_closest_match = None
+        # self.bm25_closest_match = None
         self.rag_entities = None
         self.ner_entities = None
         self.answers = {}
@@ -39,8 +39,7 @@ class RootNode(Node):
             "prompt": self.prompt,
             "parent": self.parent.id if self.parent else None,
             "children": [child.to_dict() for child in self.children],
-            # "embedding": self.embedding,
-            # "rag_closest_match": self.rag_closest_match,
+            "rag_closest_match": self.rag_closest_match,
             # "contriever_closest_match": self.contriever_closest_match,
             # "bm25_closest_match": self.bm25_closest_match,
             "rag_entities": self.rag_entities,
@@ -62,8 +61,8 @@ class SemanticNode(Node):
         threshold,
         embedding,
         rag_closest_match,
-        contriever_closest_match,
-        bm25_closest_match,
+        # contriever_closest_match,
+        # bm25_closest_match,
         rag_entities,
         ner_entities,
         parent=None,
@@ -79,8 +78,6 @@ class SemanticNode(Node):
         self.embedding = embedding
         self.rag_closest_match = rag_closest_match
         self.rag_entities = rag_entities
-        self.contriever_closest_match = contriever_closest_match
-        self.bm25_closest_match = bm25_closest_match
         self.ner_entities = ner_entities
         self.complexity_score = complexity_score
         self.fk_score = fk_score
@@ -93,10 +90,7 @@ class SemanticNode(Node):
             "prompt": self.prompt,
             "parent": self.parent.id if self.parent else None,
             "children": [child.to_dict() for child in self.children],
-            # "embedding": self.embedding,
-            # "rag_closest_match": self.rag_closest_match,
-            # "contriever_closest_match": self.contriever_closest_match,
-            # "bm25_closest_match": self.bm25_closest_match,
+            "rag_closest_match": self.rag_closest_match,
             "rag_entities": self.rag_entities,
             "ner_entities": self.ner_entities,
             "answers": self.answers,
@@ -116,8 +110,6 @@ class SyntacticNode(Node):
         syntax_similarity_score,
         threshold,
         rag_closest_match,
-        contriever_closest_match,
-        bm25_closest_match,
         rag_entities,
         ner_entities,
         parent=None,
@@ -127,8 +119,6 @@ class SyntacticNode(Node):
         self.threshold = threshold
         self.rag_closest_match = rag_closest_match
         self.rag_entities = rag_entities
-        self.contriever_closest_match = contriever_closest_match
-        self.bm25_closest_match = bm25_closest_match
         self.ner_entities = ner_entities
     
     def to_dict(self):
@@ -138,10 +128,7 @@ class SyntacticNode(Node):
             "prompt": self.prompt,
             "parent": self.parent.id if self.parent else None,
             "children": [child.to_dict() for child in self.children],
-            # "embedding": self.embedding,
-            # "rag_closest_match": self.rag_closest_match,
-            # "contriever_closest_match": self.contriever_closest_match,
-            # "bm25_closest_match": self.bm25_closest_match,
+            "rag_closest_match": self.rag_closest_match,
             "rag_entities": self.rag_entities,
             "ner_entities": self.ner_entities,
             "answers": self.answers,

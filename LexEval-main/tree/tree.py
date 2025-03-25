@@ -33,17 +33,9 @@ class Tree:
         closest_match = self.rag.find_most_relevant_page(
             wiki_data=wiki_data, prompt=root_prompt
         )
-        contriever_closest_match = self.rag.find_closest_contriever_match(
-            wiki_data=wiki_data, prompt=root_prompt
-        )
-        bm25_retriever = self.rag.create_retriever(wiki_data)
         self.rag_entities = self.rag.search_entities(prompt=root_prompt).split(",")
         self.ner_entities = self.rag.search_entities_NER(prompt=root_prompt)
         self.root.rag_closest_match = closest_match
-        self.root.contriever_closest_match = contriever_closest_match
-        self.root.bm25_closest_match = self.rag.retrieve_bm25(
-            bm25_retriever, root_prompt
-        )
         self.thresholds = [] if prev_state is None else prev_state["thresholds"]
         self.prompt_list = [root_prompt] if prev_state is None else prev_state["prompt_list"]
         self.time_semantic = 0 if prev_state is None else prev_state["time_semantic"]
@@ -112,20 +104,12 @@ class Tree:
         rag_entities = self.rag.search_entities(prompt=syn_perturb).split(",")
         ner_entities = self.rag.search_entities_NER(prompt=syn_perturb)
         rag_closest_match = closest_match
-        contriever_closest_match = self.rag.find_closest_contriever_match(
-            wiki_data=wiki_data, prompt=syn_perturb
-        )
-        bm25_retriever = self.rag.create_retriever(wiki_data)
         syntactic_node = SyntacticNode(
             syn_perturb,
             0.0,
             "test_context",
             parent=node,
             rag_closest_match=rag_closest_match,
-            contriever_closest_match=contriever_closest_match,
-            bm25_closest_match=self.rag.retrieve_bm25(
-                bm25_retriever, syn_perturb
-            ),
             rag_entities=rag_entities,
             ner_entities=ner_entities,
         )
@@ -187,9 +171,6 @@ class Tree:
         closest_match = self.rag.find_most_relevant_page(wiki_data, perturbation)
         rag_entities = self.rag.search_entities(perturbation).split(",")
         ner_entities = self.rag.search_entities_NER(perturbation)
-        contriever_match = self.rag.find_closest_contriever_match(wiki_data, perturbation)
-        bm25_retriever = self.rag.create_retriever(wiki_data)
-        bm25_match = self.rag.retrieve_bm25(bm25_retriever, perturbation)
         
         return SemanticNode(
             perturbation,
@@ -198,8 +179,6 @@ class Tree:
             lower_thresh,
             self.embed_model.encode(perturbation),
             closest_match,
-            contriever_match,
-            bm25_match,
             rag_entities,
             ner_entities,
             parent=parent_node,
@@ -207,21 +186,6 @@ class Tree:
             dc_score=dc_score,
             complexity_score=complexity_score
         )  
-
-    def evaluate(self):
-        queue = []
-        sum = 0
-        queue.append((self.root, 1))
-        while len(queue) != 0:
-            node, level = queue.pop()
-            if node.type == "semantic":
-                pass
-            if node.type == "syntactic":
-                pass
-            for child in node.children:
-                queue.append((child, level + 1))
-
-        return sum
 
     def make_thresholds(self, distribution, upper_bound, lower_bound, depth):
         if distribution == "linear":
@@ -270,8 +234,6 @@ class Tree:
         queue = [self.root]
         responses = []
         base_rag_responses = []
-        bm25_responses = []
-        contriever_responses = []
 
         true_positives = 0
         false_positives = 0
@@ -280,14 +242,6 @@ class Tree:
         rag_true_positives = 0
         rag_false_positives = 0
         rag_false_negatives = 0
-
-        bm25_true_positives = 0
-        bm25_false_positives = 0
-        bm25_false_negatives = 0
-
-        contr_true_positives = 0
-        contr_false_positives = 0
-        contr_false_negatives = 0
 
         while queue:
             node = queue.pop()
@@ -304,41 +258,15 @@ class Tree:
             else:
                 base_rag_response = "No answer"
 
-            if node.bm25_closest_match is not None:
-                bm25_rag_response = self.rag.answer_using_wiki(
-                    model_name,
-                    node.prompt,
-                    node.bm25_closest_match[0].page_content,
-                    "",
-                )
-            else:
-                bm25_rag_response = "No answer"
-
-            if node.contriever_closest_match is not None:
-                contriever_response = self.rag.answer_using_wiki(
-                    model_name,
-                    node.prompt,
-                    node.contriever_closest_match["text"]["content"],
-                    node.contriever_closest_match["text"]["title"],
-                )
-            else:
-                contriever_response = "No answer"
-
             found_match = False
             rag_found_match = False
-            bm25_found_match = False
-            contr_found_match = False
 
             node.answers[model_name] = {}
             node.answers[model_name]["base"] = response
             node.answers[model_name]["base_rag"] = base_rag_response
-            node.answers[model_name]["bm25_rag"] = bm25_rag_response
-            node.answers[model_name]["contriever_rag"] = contriever_response
 
             responses.append(response)
             base_rag_responses.append(base_rag_response)
-            bm25_responses.append(bm25_rag_response)
-            contriever_responses.append(contriever_response)
 
             for expected_answer in json.loads(self.possible_answers):
                 if response.__contains__(expected_answer):
@@ -356,30 +284,10 @@ class Tree:
             if not rag_found_match:
                 rag_false_positives += 1
 
-            for expected_answer in json.loads(self.possible_answers):
-                if bm25_rag_response.__contains__(expected_answer):
-                    bm25_found_match = True
-                    bm25_true_positives += 1
-                    break
-            if not bm25_found_match:
-                bm25_false_positives += 1
-
-            for expected_answer in json.loads(self.possible_answers):
-                if contriever_response.__contains__(expected_answer):
-                    contr_found_match = True
-                    contr_true_positives += 1
-                    break
-            if not contr_found_match:
-                contr_false_positives += 1
-
             if not found_match:
                 false_negatives += 1
             if not rag_found_match:
                 rag_false_negatives += 1
-            if not bm25_found_match:
-                bm25_false_negatives += 1
-            if not contr_found_match:
-                contr_false_negatives += 1
             for child in node.children:
                 queue.append(child)
 
@@ -442,94 +350,6 @@ class Tree:
         except:
             rag_f1_score = 0
 
-        # Calculate accuracy and F1 score for BM25
-        bm25_accuracy = (
-            bm25_true_positives
-            / (
-                    bm25_true_positives
-                    + bm25_false_positives
-                    + bm25_false_negatives
-            )
-            if (
-                       bm25_true_positives
-                       + bm25_false_positives
-                       + bm25_false_negatives
-               )
-               > 0
-            else 0
-        )
-        try:
-            bm25_f1_score = (
-                2
-                * (
-                        bm25_true_positives
-                        / (bm25_true_positives + bm25_false_positives)
-                )
-                * (
-                        bm25_true_positives
-                        / (bm25_true_positives + bm25_false_negatives)
-                )
-                / (
-                        (
-                                bm25_true_positives
-                                / (bm25_true_positives + bm25_false_positives)
-                        )
-                        + (
-                                bm25_true_positives
-                                / (bm25_true_positives + bm25_false_negatives)
-                        )
-                )
-                if (bm25_true_positives + bm25_false_positives) > 0
-                   and (bm25_true_positives + bm25_false_negatives) > 0
-                else 0
-            )
-        except:
-            bm25_f1_score = 0
-
-        # Calculate accuracy and F1 score for Contriever
-        contr_accuracy = (
-            contr_true_positives
-            / (
-                    contr_true_positives
-                    + contr_false_positives
-                    + contr_false_negatives
-            )
-            if (
-                       contr_true_positives
-                       + contr_false_positives
-                       + contr_false_negatives
-               )
-               > 0
-            else 0
-        )
-        try:
-            contr_f1_score = (
-                2
-                * (
-                        contr_true_positives
-                        / (contr_true_positives + contr_false_positives)
-                )
-                * (
-                        contr_true_positives
-                        / (contr_true_positives + contr_false_negatives)
-                )
-                / (
-                        (
-                                contr_true_positives
-                                / (contr_true_positives + contr_false_positives)
-                        )
-                        + (
-                                contr_true_positives
-                                / (contr_true_positives + contr_false_negatives)
-                        )
-                )
-                if (contr_true_positives + contr_false_positives) > 0
-                   and contr_true_positives > 0
-                   and (contr_true_positives + contr_false_negatives) > 0
-                else 0
-            )
-        except:
-            contr_f1_score = 0
 
         end_time = time.time()
         self.time_check[model_name] = end_time - start_time
@@ -538,8 +358,6 @@ class Tree:
             "answers": {
                 "base": responses,
                 "base_rag": base_rag_responses,
-                "bm25_rag": bm25_responses,
-                "contriever_rag": contriever_responses,
             },
             "metrics": {
                 "base": {
@@ -549,14 +367,6 @@ class Tree:
                 "base_rag": {
                     "accuracy": rag_accuracy,
                     "f1_score": rag_f1_score,
-                },
-                "bm25_rag": {
-                    "accuracy": bm25_accuracy,
-                    "f1_score": bm25_f1_score,
-                },
-                "contriever_rag": {
-                    "accuracy": contr_accuracy,
-                    "f1_score": contr_f1_score,
                 },
             },
         }
@@ -588,8 +398,6 @@ class Tree:
         # This method contains the code to process a single node.
         response = self.adapter.sem_check(node.prompt, model_name)
         base_rag_response = "No answer"
-        bm25_rag_response = "No answer"
-        contriever_response = "No answer"
         if node.rag_closest_match is not None:
             base_rag_response = self.rag.answer_using_wiki(
                 model_name,
@@ -597,25 +405,9 @@ class Tree:
                 node.rag_closest_match["content"],
                 node.rag_closest_match["title"],
             )
-        if node.bm25_closest_match is not None:
-            bm25_rag_response = self.rag.answer_using_wiki(
-                model_name,
-                node.prompt,
-                node.bm25_closest_match[0].page_content,
-                "",
-            )
-        if node.contriever_closest_match is not None:
-            contriever_response = self.rag.answer_using_wiki(
-                model_name,
-                node.prompt,
-                node.contriever_closest_match["text"]["content"],
-                node.contriever_closest_match["text"]["title"],
-            )
         node.answers[model_name] = {}
         node.answers[model_name]["base"] = response
         node.answers[model_name]["base_rag"] = base_rag_response
-        node.answers[model_name]["bm25_rag"] = bm25_rag_response
-        node.answers[model_name]["contriever_rag"] = contriever_response
 
         true_positives = 0
         false_positives = 0
@@ -625,18 +417,8 @@ class Tree:
         base_false_positives = 0
         base_false_negatives = 0
 
-        bm25_true_positives = 0
-        bm25_false_positives = 0
-        bm25_false_negatives = 0
-
-        cont_true_positives = 0
-        cont_false_positives = 0
-        cont_false_negatives = 0
-
         found_match = False
         rag_found_match = False
-        bm25_found_match = False
-        contr_found_match = False
 
         for expected_answer in json.loads(self.possible_answers):
             if response.__contains__(expected_answer):
@@ -654,30 +436,10 @@ class Tree:
         if not rag_found_match:
             base_false_positives += 1
 
-        for expected_answer in json.loads(self.possible_answers):
-            if bm25_rag_response.__contains__(expected_answer):
-                bm25_found_match = True
-                bm25_true_positives += 1
-                break
-        if not bm25_found_match:
-            bm25_false_positives += 1
-
-        for expected_answer in json.loads(self.possible_answers):
-            if contriever_response.__contains__(expected_answer):
-                contr_found_match = True
-                cont_true_positives += 1
-                break
-        if not contr_found_match:
-            cont_false_positives += 1
-
         if not found_match:
             false_negatives += 1
         if not rag_found_match:
             base_false_negatives += 1
-        if not bm25_found_match:
-            bm25_false_negatives += 1
-        if not contr_found_match:
-            cont_false_negatives += 1
 
         values = {
             "base": {
@@ -689,16 +451,6 @@ class Tree:
                 "true_pos": base_true_positives,
                 "false_pos": base_false_positives,
                 "false_neg": base_false_negatives,
-            },
-            "bm25_rag": {
-                "true_pos": bm25_true_positives,
-                "false_pos": bm25_false_positives,
-                "false_neg": bm25_false_negatives,
-            },
-            "contriever_rag": {
-                "true_pos": cont_true_positives,
-                "false_pos": cont_false_positives,
-                "false_neg": cont_false_negatives,
             },
         }
         if isinstance(node, (RootNode, SemanticNode)):
@@ -729,15 +481,11 @@ class Tree:
 
         responses = []
         base_rag_responses = []
-        bm25_responses = []
-        contriever_responses = []
 
         # Initialize counters for each model
         metrics = {
             "base": {"true_pos": 0, "false_pos": 0, "false_neg": 0},
             "base_rag": {"true_pos": 0, "false_pos": 0, "false_neg": 0},
-            "bm25_rag": {"true_pos": 0, "false_pos": 0, "false_neg": 0},
-            "contriever_rag": {"true_pos": 0, "false_pos": 0, "false_neg": 0},
         }       
         while queue:
             batch = [
@@ -750,8 +498,6 @@ class Tree:
                 # Append results
                 responses.append(answers["base"])
                 base_rag_responses.append(answers["base_rag"])
-                bm25_responses.append(answers["bm25_rag"])
-                contriever_responses.append(answers["contriever_rag"])
                 
                 # Update the metrics
                 for metric in metrics:
@@ -771,8 +517,6 @@ class Tree:
             "answers": {
                 "base": responses,
                 "base_rag": base_rag_responses,
-                "bm25_rag": bm25_responses,
-                "contriever_rag": contriever_responses,
             },
             "metrics": metrics,
         }
@@ -796,7 +540,7 @@ class Tree:
         if not hasattr(self, "metrics"):
             self.run_check_pop_qa(model_name)
 
-        for method in ["base", "base_rag", "bm25_rag", "contriever_rag"]:
+        for method in ["base", "base_rag"]:
             predictions = self.metrics[model_name]["answers"][method]
             cands = [response.split() for response in predictions]
             refs = [base_references for _ in cands]
