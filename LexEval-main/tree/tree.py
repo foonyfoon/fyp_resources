@@ -7,28 +7,37 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import textstat
 import pickle
-
-from adapters.OAI_Embeddings import OAIEmbedAdapter
-from similarity.cosine_similarity import similarity
-
 from rouge_score import rouge_scorer
 from nltk.translate.bleu_score import corpus_bleu
 
+from adapters.OAI_Embeddings import OAIEmbedAdapter
+from similarity.cosine_similarity import similarity
 from adapters.rag import RAGAgent
 from tree.node import RootNode, SyntacticNode, SemanticNode
 
 
 class Tree:
-    def __init__(self, root_prompt, adapter, perturbor, rag, prev_state=None):
-        self.rag = rag
+    def __init__(self, root_prompt, **kwargs):
+        # answer model
+        if kwargs.get("eval", False):
+            self.generator = kwargs.get("generator")
+            self.rag = RAGAgent(eval=True, generator=self.generator)
+        else:
+            # uses llm for NER
+            self.rag = RAGAgent(eval=False, ner_model=kwargs.get("ner_model"))
+            # preturb model
+            self.sem_perturber = kwargs.get("sem_perturber")
+            self.syn_perturber = kwargs.get("syn_perturber")
+            
         self.embed_model = OAIEmbedAdapter()
         self.root_prompt = root_prompt
-        self.adapter = adapter
-        self.perturbor = perturbor
         self.num_semantic = 0
         self.num_syntactic = 0
+        
+        prev_state = kwargs.get("prev_state", None)
         self.root = RootNode(root_prompt) if prev_state is None else prev_state["root"]
         self.root.embedding = self.embed_model.encode(root_prompt)
+        
         wiki_data = self.rag.retrieve_wiki_data(root_prompt)
         closest_match = self.rag.find_most_relevant_page(
             wiki_data=wiki_data, prompt=root_prompt
@@ -36,17 +45,19 @@ class Tree:
         self.rag_entities = self.rag.search_entities(prompt=root_prompt).split(",")
         self.ner_entities = self.rag.search_entities_NER(prompt=root_prompt)
         self.root.rag_closest_match = closest_match
+        
         self.thresholds = [] if prev_state is None else prev_state["thresholds"]
         self.prompt_list = [root_prompt] if prev_state is None else prev_state["prompt_list"]
         self.time_semantic = 0 if prev_state is None else prev_state["time_semantic"]
         self.time_syntactic = 0 if prev_state is None else prev_state["time_syntactic"]
         self.time_check = {} if prev_state is None else prev_state["time_check"]
         self.metrics = {} if prev_state is None else prev_state["metrics"]   
-
+        self.possible_answers = {} if prev_state is None else prev_state["metrics"]    
+        
     def set_possible_answers(self, possible_answers):
         self.possible_answers = possible_answers
 
-    def make_tree(self, depth, num_semantic, num_syntactic, model_name='gpt-3.5-turbo', rag_eval=False):
+    def make_tree(self, depth, num_semantic, num_syntactic, model_name='gpt-3.5-turbo'):
         start_time = time.time()
         self.num_semantic = num_semantic
         self.num_syntactic = num_syntactic
@@ -93,9 +104,9 @@ class Tree:
         print("Total time: ", syn_time - start_time)
       
     def generate_syntactic_node(self, node):
-        syn_perturb = self.perturbor.syn_perturb(
+        syn_perturb = self.syn_perturber.syn_perturb(
                     text=node.prompt,
-                    butterfinger=self.perturbor.butterfinger,
+                    butterfinger=self.syn_perturber.butterfinger,
                 )
         wiki_data = self.rag.retrieve_wiki_data(syn_perturb)
         closest_match = self.rag.find_most_relevant_page(
@@ -123,8 +134,7 @@ class Tree:
         original_prompt = parent_node.prompt
         retry_count = 0
         max_retries = 5
-        # anything under 1 should be good; and quite similar: https://arxiv.org/pdf/2402.05201
-        max_temp = 0.7
+        max_temp = 1.5
         is_valid = False
         
         current_prompt = original_prompt
@@ -134,7 +144,7 @@ class Tree:
             # get perturbation (initial or retry with temperature)
             temp = min(max_temp, 1.2 * ((1 + retry_count) / max_retries)) 
             print(f"generate_semantic_node: retry at {retry_count} with temp={temp}")
-            perturbation = self.adapter.sem_perturb(current_prompt, prompt_list=self.prompt_list, temp=temp)
+            perturbation = self.sem_perturber.sem_perturb(current_prompt, prompt_list=self.prompt_list, temp=temp)
             perturbation = perturbation.strip()
 
             # calc embeddings and similarities
@@ -211,7 +221,7 @@ class Tree:
         while queue:
             node = queue.pop()
             num_nodes += 1
-            response = self.adapter.sem_check(context, node.prompt)
+            response = self.base.sem_check(context, node.prompt)
             if response.__contains__(expected_answer):
                 print(
                     node.root_similarity_score
@@ -245,7 +255,7 @@ class Tree:
 
         while queue:
             node = queue.pop()
-            response = self.adapter.sem_check(node.prompt, model_name)
+            response = self.base.sem_check(node.prompt, model_name)
 
             if node.rag_closest_match is not None:
                 base_rag_response = self.rag.answer_using_wiki(
@@ -396,7 +406,7 @@ class Tree:
 
     def process_node(self, node, model_name):
         # This method contains the code to process a single node.
-        response = self.adapter.sem_check(node.prompt, model_name)
+        response = self.generator.sem_check(node.prompt, model_name)
         base_rag_response = "No answer"
         if node.rag_closest_match is not None:
             base_rag_response = self.rag.answer_using_wiki(
@@ -642,7 +652,8 @@ class Tree:
             "time_syntactic": self.time_syntactic,
             "time_check": self.time_check,
             "metrics": self.metrics,
-            "root_prompt": self.root_prompt
+            "root_prompt": self.root_prompt,
+            "possible_answers": self.possible_answers 
         }
         dir = os.path.dirname(file_path)
         if not os.path.exists(dir):
@@ -651,10 +662,16 @@ class Tree:
             pickle.dump(node, file)
 
     @staticmethod
-    def load_tree(file_path, adapter, perturbor, rag):
+    def load_tree(file_path, eval=False, **kargs):
         prev_state = {}
         with open(file_path, "rb") as file:
             prev_state = pickle.load(file)
         root_prompt = prev_state["root_prompt"]
-        return Tree(root_prompt, adapter, perturbor, rag, prev_state=prev_state)
+        return Tree(root_prompt,
+                    eval=eval,
+                    sem_perturber=kargs.get("sem_perturber", None),
+                    syn_perturber=kargs.get("syn_perturber", None),
+                    generator=kargs.get("generator", None),
+                    prev_state=prev_state,
+                    )
 
