@@ -19,7 +19,8 @@ from tree.node import RootNode, SyntacticNode, SemanticNode
 class Tree:
     def __init__(self, root_prompt, **kwargs):
         # answer model
-        if kwargs.get("eval", False):
+        is_eval = kwargs.get("eval", False)
+        if is_eval:
             self.generator = kwargs.get("generator")
             self.rag = RAGAgent(eval=True, generator=self.generator)
         else:
@@ -38,21 +39,28 @@ class Tree:
         self.root = RootNode(root_prompt) if prev_state is None else prev_state["root"]
         self.root.embedding = self.embed_model.encode(root_prompt)
         
-        wiki_data = self.rag.retrieve_wiki_data(root_prompt)
-        closest_match = self.rag.find_most_relevant_page(
-            wiki_data=wiki_data, prompt=root_prompt
-        )
-        self.rag_entities = self.rag.search_entities(prompt=root_prompt).split(",")
-        self.ner_entities = self.rag.search_entities_NER(prompt=root_prompt)
-        self.root.rag_closest_match = closest_match
+        if is_eval and prev_state is not None:
+            self.rag_entities = prev_state.get("rag_entities")
+            self.ner_entities = prev_state.get("ner_entities")
+            self.root.rag_closest_match = prev_state.get("rag_closest_match")
+        elif not is_eval:
+            # Otherwise, run retriever pipeline
+            wiki_data = self.rag.retrieve_wiki_data(root_prompt)
+            closest_match = self.rag.find_most_relevant_page(
+                wiki_data=wiki_data, prompt=root_prompt
+            )
+            self.rag_entities = self.rag.search_entities(prompt=root_prompt).split(",")
+            self.ner_entities = self.rag.search_entities_NER(prompt=root_prompt)
+            self.root.rag_closest_match = closest_match
         
         self.thresholds = [] if prev_state is None else prev_state["thresholds"]
         self.prompt_list = [root_prompt] if prev_state is None else prev_state["prompt_list"]
         self.time_semantic = 0 if prev_state is None else prev_state["time_semantic"]
         self.time_syntactic = 0 if prev_state is None else prev_state["time_syntactic"]
         self.time_check = {} if prev_state is None else prev_state["time_check"]
-        self.metrics = {} if prev_state is None else prev_state["metrics"]   
-        self.possible_answers = {} if prev_state is None else prev_state["metrics"]    
+        self.metrics = {} if prev_state is None else prev_state["metrics"]
+        self.possible_answers = {} if prev_state is None else prev_state["possible_answers"]
+
         
     def set_possible_answers(self, possible_answers):
         self.possible_answers = possible_answers
@@ -653,7 +661,10 @@ class Tree:
             "time_check": self.time_check,
             "metrics": self.metrics,
             "root_prompt": self.root_prompt,
-            "possible_answers": self.possible_answers 
+            "possible_answers": self.possible_answers,
+            "rag_entities": self.rag_entities,
+            "ner_entities":self.ner_entities,
+            "rag_closest_match": self.root.rag_closest_match
         }
         dir = os.path.dirname(file_path)
         if not os.path.exists(dir):
