@@ -2,6 +2,7 @@ from tree.tree import Tree
 from adapters.SemanticAdapter import SemanticAdapter
 from adapters.SemanticPerturb import ParaphrasePerturber
 from adapters.SyntacticPerturb import SyntacticPerturber
+from adapters.OAI_Embeddings import EmbedAdapter, RobertaEmbedder
 from model.engine import GemmaAdapter
 
 import pandas as pd
@@ -14,13 +15,14 @@ from datetime import datetime
 import gc
 import sys
 import re
+import traceback
 
 RETRY_COUNT = 2
 ERROR_THRESHOLD = 3000
 DLQ = []  # Dead Letter Queue
 CHUNK_SIZE = 50
-intermediatory_tree_dir="/vol/bitbucket/lst20/treenodes/base/3_2_1/tree"
-checked_tree_dir="/vol/bitbucket/lst20/treenodes/base/3_2_1/complete"
+intermediatory_tree_dir="/vol/bitbucket/lst20/treenodes/base/3_1_0/tree"
+checked_tree_dir="/vol/bitbucket/lst20/treenodes/base/3_1_0/complete"
 
 def clear_cache():
     # Clear any leftover tensors
@@ -51,7 +53,7 @@ def write_to_dlq(filename, text):
         dlq_file.write(f"{text}:\n")   
 
 
-def get_answer(index, generator, modelId):
+def get_answer(index, generator, modelId, embedder):
     tree_file_path = f"{intermediatory_tree_dir}/{index}.pkl"
     checked_tree_file_path = f"{checked_tree_dir}/{index}_checked.pkl"
     max_retries = RETRY_COUNT
@@ -59,7 +61,7 @@ def get_answer(index, generator, modelId):
         logging.info(f"Evaluating tree of dataset row: {index}, attempt: {retry_count}")
         try:
             # Load tree in evaluation mode using the generator
-            test_tree = Tree.load_tree(tree_file_path, eval=True, generator=generator)
+            test_tree = Tree.load_tree(tree_file_path, eval=True, generator=generator, embedder=embedder)
             test_tree.run_check_pop_qa_batched(model_name=modelId)
             test_tree.add_bleu_and_rouge(model_name=modelId)
             test_tree.save_tree(checked_tree_file_path)
@@ -84,7 +86,7 @@ def get_answer(index, generator, modelId):
                 raise err  # re-raise if max retries reached
 
 
-def get_question_tree(index, row, semantic_adapter, syntactic_adapter, ner_model):
+def get_question_tree(index, row, semantic_adapter, syntactic_adapter, ner_model, embedder):
     max_retries = RETRY_COUNT
     for retry_count in range(max_retries + 1):
         try:
@@ -104,9 +106,10 @@ def get_question_tree(index, row, semantic_adapter, syntactic_adapter, ner_model
                     eval=False,
                     sem_perturber=semantic_adapter,
                     syn_perturber=syntactic_adapter,
-                    ner_model=ner_model
+                    ner_model=ner_model,
+                    embedder=embedder
                 )
-                test_tree.make_tree(3, 2, 1)
+                test_tree.make_tree(3, 1, 0)
                 test_tree.set_possible_answers(possible_answers)
                 test_tree.save_tree(tree_file_path)
                 
@@ -176,13 +179,13 @@ if __name__ == "__main__":
         print(f"File downloaded and saved to {df_location}")
     
     start_time = time.time()
-    
-    logging.info("start time: %s", start_time)
+    logging.info("Start time: %s", time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_time)))
     ##################### factory this ###########################
     preturb_modelId = "google/gemma-2-9b-it"
     model = GemmaAdapter(preturb_modelId)
     semantic_adapter = ParaphrasePerturber(model)
     syntactic_adapter = SyntacticPerturber()
+    embedder = RobertaEmbedder()
     ##############################################################
     model_provisioned_time = time.time()
     model_start_duration = model_provisioned_time - start_time
@@ -194,13 +197,19 @@ if __name__ == "__main__":
     for index, row in df.iloc[start_idx:end_idx + 1].iterrows():
         try:
             with torch.no_grad():
-                get_question_tree(index, row, semantic_adapter, syntactic_adapter, model)
+                get_question_tree(index, row, semantic_adapter, syntactic_adapter, model, embedder)
         except Exception or RuntimeError as err:
             if error_questions < ERROR_THRESHOLD:
                 error_questions += 1
-                logging.info(f"Qeustion of index: {index} cannot be processed, adding to DLQ. {ERROR_THRESHOLD - error_questions} tries left. error: {err}")
-                DLQ.append({"num": index, "err": err})
-                write_to_dlq(dlq_path, str({"num": index, "err": err}))
+                # Get the full stack trace as a string
+                stack_trace = traceback.format_exc()
+                logging.info(
+                    f"Question of index: {index} cannot be processed, adding to DLQ. "
+                    f"{ERROR_THRESHOLD - error_questions} tries left. error: {err}\nStack trace:\n{stack_trace}"
+                )
+                error_entry = {"num": index, "err": str(err), "trace": stack_trace}
+                DLQ.append(error_entry)
+                write_to_dlq(dlq_path, str(error_entry))
             else:
                 logging.error(f"Error threshold reached. Question after index {index} will not be processed.")
                 DLQ.append({"num": index, "err": err})
@@ -226,18 +235,25 @@ if __name__ == "__main__":
     ##################### factory this ###########################
     gen_modelId = "google/gemma-2-9b-it"
     generator_model = GemmaAdapter(gen_modelId)
-    generator = SemanticAdapter(generator_model)
-    # ##############################################################
-    for index in range(start_idx, end_idx):
+    generator = generator_model
+    embedder = RobertaEmbedder()
+    # ############################################################
+    for index in range(start_idx, end_idx + 1):
         try:
             # generate questions
-            get_answer(index, generator, gen_modelId)
+            get_answer(index, generator, gen_modelId, embedder)
         except Exception or RuntimeError as err:
             if error_questions < ERROR_THRESHOLD:
                 error_questions += 1
-                logging.info(f"Qeustion of index: {index} cannot be processed, adding to DLQ. {ERROR_THRESHOLD - error_questions} tries left. error: {err}")
-                DLQ.append({"num": index, "err": err})
-                write_to_dlq(dlq_path, str({"num": index, "err": err}))
+                # Get the full stack trace as a string
+                stack_trace = traceback.format_exc()
+                logging.info(
+                    f"Question of index: {index} cannot be processed, adding to DLQ. "
+                    f"{ERROR_THRESHOLD - error_questions} tries left. error: {err}\nStack trace:\n{stack_trace}"
+                )
+                error_entry = {"num": index, "err": str(err), "trace": stack_trace}
+                DLQ.append(error_entry)
+                write_to_dlq(dlq_path, str(error_entry))
             else:
                 logging.error(f"Error threshold reached. Question after index {index} will not be processed.")
                 DLQ.append({"num": index, "err": err})

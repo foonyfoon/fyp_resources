@@ -3,6 +3,8 @@ from collections import deque
 import time
 import os
 import logging
+from abc import ABC, abstractmethod
+
 import networkx as nx
 import matplotlib.pyplot as plt
 import textstat
@@ -10,27 +12,87 @@ import pickle
 from rouge_score import rouge_scorer
 from nltk.translate.bleu_score import corpus_bleu
 
-from adapters.OAI_Embeddings import OAIEmbedAdapter
+from adapters.SemanticAdapter import SemanticAdapter
+from adapters.OAI_Embeddings import EmbedAdapter, RobertaEmbedder
 from similarity.cosine_similarity import similarity
 from adapters.rag import RAGAgent
 from tree.node import RootNode, SyntacticNode, SemanticNode
 
+class AbstractTree(ABC): 
+    def print_tree(self, node=None, level=0, model_name=None, truncate_passage=True):
+        def _tuncate_wiki_page(page: tuple, max_char=45) -> tuple:
+            """
+            used only in print_tree() to truncate long title, content and summary of wiki page
+            input: (wikipage, sim_score): tuple
+            """
+            return ({
+                **page[0],
+                "summary": page[0]["summary"] if len(page[0]["summary"]) <= max_char else page[0]["summary"][:max_char] + "...",
+                "content": page[0]["content"] if len(page[0]["content"]) <= max_char else page[0]["content"][:max_char] + "...",
+                "title": page[0]["title"] if len(page[0]["title"]) <= max_char else page[0]["title"][:max_char] + "..."
+            }, page[1])
+        if node is None:
+            node = self.root
 
-class Tree:
+        indent = "  " * level
+        print(f"{indent}{node.id} - {node.prompt} ({node.__class__.__name__})")
+            
+        if isinstance(node, (RootNode, SemanticNode)):
+            closest_match = list(map(_tuncate_wiki_page, node.rag_closest_match)) if truncate_passage is True else node.rag_closest_match
+            print(f"{indent}{node.id} - {node.prompt}:")
+            print(f"{indent}- RAG({closest_match})")
+            print(f"{indent}- NER({node.rag_entities})")
+            print(f"{indent}complexity_score: {node.complexity_score}, dc_score: {node.dc_score}, fk_score: {node.fk_score}")
+        else:
+            print(f"{indent}{node.id} - {node.prompt} - NER({node.rag_entities})")
+        for model, answer in node.answers.items():
+            print(f"{indent}Answer ({model}): {answer}")
+
+        for child in node.children:
+            self.print_tree(child, level + 1, model_name, truncate_passage)
+
+class ReadTree(AbstractTree):
+    def __init__(self, root_prompt, prev_state=None):
+        self.root_prompt = root_prompt
+        self.root = RootNode(root_prompt) if prev_state is None else prev_state["root"]
+        self.thresholds = [] if prev_state is None else prev_state["thresholds"]
+        self.prompt_list = [root_prompt] if prev_state is None else prev_state["prompt_list"]
+        self.time_semantic = 0 if prev_state is None else prev_state["time_semantic"]
+        self.time_syntactic = 0 if prev_state is None else prev_state["time_syntactic"]
+        self.time_check = {} if prev_state is None else prev_state["time_check"]
+        self.metrics = {} if prev_state is None else prev_state["metrics"]
+        self.possible_answers = {} if prev_state is None else prev_state["possible_answers"]
+        self.rag_entities = [] if prev_state is None else prev_state["rag_entities"]
+        self.ner_entities = [] if prev_state is None else prev_state["ner_entities"]
+        self.rag_closest_match = [] if prev_state is None else prev_state["rag_closest_match"]
+        
+    @staticmethod
+    def load_read_tree(file_path):
+        prev_state = {}
+        with open(file_path, "rb") as file:
+            prev_state = pickle.load(file)
+        root_prompt = prev_state["root_prompt"]
+        return ReadTree(root_prompt, prev_state=prev_state)
+    
+class Tree(AbstractTree):
     def __init__(self, root_prompt, **kwargs):
         # answer model
         is_eval = kwargs.get("eval", False)
         if is_eval:
             self.generator = kwargs.get("generator")
             self.rag = RAGAgent(eval=True, generator=self.generator)
+            self.base = SemanticAdapter(self.generator)
         else:
             # uses llm for NER
-            self.rag = RAGAgent(eval=False, ner_model=kwargs.get("ner_model"))
+            self.rag = RAGAgent(eval=False,
+                                ner_model=kwargs.get("ner_model"),
+                                embedder=kwargs.get("embedder"),
+                                )
             # preturb model
             self.sem_perturber = kwargs.get("sem_perturber")
             self.syn_perturber = kwargs.get("syn_perturber")
             
-        self.embed_model = OAIEmbedAdapter()
+        self.embed_model = kwargs.get("embedder") 
         self.root_prompt = root_prompt
         self.num_semantic = 0
         self.num_syntactic = 0
@@ -49,7 +111,7 @@ class Tree:
             closest_match = self.rag.find_most_relevant_page(
                 wiki_data=wiki_data, prompt=root_prompt
             )
-            self.rag_entities = self.rag.search_entities(prompt=root_prompt).split(",")
+            self.rag_entities = self.rag.search_entities_2(prompt=root_prompt)
             self.ner_entities = self.rag.search_entities_NER(prompt=root_prompt)
             self.root.rag_closest_match = closest_match
         
@@ -116,11 +178,9 @@ class Tree:
                     text=node.prompt,
                     butterfinger=self.syn_perturber.butterfinger,
                 )
-        wiki_data = self.rag.retrieve_wiki_data(syn_perturb)
-        closest_match = self.rag.find_most_relevant_page(
-            wiki_data=wiki_data, prompt=syn_perturb
-        )
-        rag_entities = self.rag.search_entities(prompt=syn_perturb).split(",")
+        wiki_data = self.rag.retrieve_wiki_data_2(syn_perturb)     
+        closest_match = self.rag.find_topk_contriever_matches(wiki_data, syn_perturb)
+        rag_entities = self.rag.search_entities_2(prompt=syn_perturb)
         ner_entities = self.rag.search_entities_NER(prompt=syn_perturb)
         rag_closest_match = closest_match
         syntactic_node = SyntacticNode(
@@ -185,9 +245,9 @@ class Tree:
         dc_score = textstat.dale_chall_readability_score(perturbation)
         complexity_score = (fk_score + dc_score) / 2
         
-        wiki_data = self.rag.retrieve_wiki_data(perturbation)
-        closest_match = self.rag.find_most_relevant_page(wiki_data, perturbation)
-        rag_entities = self.rag.search_entities(perturbation).split(",")
+        wiki_data = self.rag.retrieve_wiki_data_2(perturbation)
+        closest_match = self.rag.find_topk_contriever_matches(wiki_data, perturbation)
+        rag_entities = self.rag.search_entities_2(prompt=perturbation)
         ner_entities = self.rag.search_entities_NER(perturbation)
         
         return SemanticNode(
@@ -266,12 +326,10 @@ class Tree:
             response = self.base.sem_check(node.prompt, model_name)
 
             if node.rag_closest_match is not None:
-                base_rag_response = self.rag.answer_using_wiki(
+                base_rag_response = self.rag.answer_using_wiki_2(
                     model_name,
                     node.prompt,
-                    node.rag_closest_match["content"],
-                    node.rag_closest_match["title"],
-                    
+                    node.rag_closest_match
                 )
             else:
                 base_rag_response = "No answer"
@@ -414,15 +472,14 @@ class Tree:
 
     def process_node(self, node, model_name):
         # This method contains the code to process a single node.
-        response = self.generator.sem_check(node.prompt, model_name)
+        response = self.base.sem_check(node.prompt, model_name)
         base_rag_response = "No answer"
         if node.rag_closest_match is not None:
-            base_rag_response = self.rag.answer_using_wiki(
-                model_name,
-                node.prompt,
-                node.rag_closest_match["content"],
-                node.rag_closest_match["title"],
-            )
+            base_rag_response = self.rag.answer_using_wiki_2(
+                    model_name,
+                    node.prompt,
+                    node.rag_closest_match
+                )
         node.answers[model_name] = {}
         node.answers[model_name]["base"] = response
         node.answers[model_name]["base_rag"] = base_rag_response
@@ -623,34 +680,7 @@ class Tree:
             for child in node.children:
                 queue.append(child)
         return None
-
-    def print_tree(self, node=None, level=0, model_name=None):
-        if node is None:
-            node = self.root
-        if type(node) == RootNode or type(node) == SyntacticNode:
-            print("  " * level + f"{node.id} - {node.prompt}")
-            if type(node) == RootNode:
-                print(print(f"complexity_score: {node.complexity_score}, dc_score: {node.dc_score}, fk_score: {node.fk_score}"))
-            for model_name in node.answers:
-                print(
-                    "  " * level
-                    + f"Answer ({model_name}): {node.answers[model_name]}"
-                )
-        else:
-            print(
-                "  " * level
-                + f"{node.id} - {node.prompt} - RAG({node.rag_closest_match})"
-            )
-            if type(node) == SemanticNode:
-                print(print(f"complexity_score: {node.complexity_score}, dc_score: {node.dc_score}, fk_score: {node.fk_score}"))
-            for model_name in node.answers:
-                print(
-                    "  " * level
-                    + f"Answer ({model_name}): {node.answers[model_name]}"
-                )
-        for child in node.children:
-            self.print_tree(child, level + 1, model_name)
-
+            
     def save_tree(self, file_path):
         node = {
             "root": self.root,
@@ -683,6 +713,7 @@ class Tree:
                     sem_perturber=kargs.get("sem_perturber", None),
                     syn_perturber=kargs.get("syn_perturber", None),
                     generator=kargs.get("generator", None),
+                    embedder=kargs.get("embedder", None),
                     prev_state=prev_state,
                     )
 

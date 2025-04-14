@@ -1,5 +1,4 @@
 from model.engine import LLMAdapter
-from error.error import PreturberInvalidValueError
 from typing import List
 import re
 import logging
@@ -25,26 +24,6 @@ class SemanticAdapter:
         response, _ = self.model.complete(prompt)
         return response
     
-    def role_based_perturb(self, user_prompt, role, prompt_list=None, temp=0):
-        forbid_text = ""
-        instruction = (f"You are a {role}. Try to rephrase the question given by speaking "
-                        f"in the manner of {role} while preserving its core intent. "
-                        "Return just the string of the sentence.")
-        if prompt_list is not None:
-            forbid_text = "\n".join([f"{idx}. {p}" for idx, p in enumerate(prompt_list, start=1)])
-            instruction += (
-                "\nHowever, there are several sentences that you MUST NOT return. "
-                f"Sentences are in this list:\n{forbid_text}"
-            )
-        prompt=self.model.format_prompt(
-            user_prompt,
-            state=[{
-                    "role": "system",
-                    "content": instruction
-                }]
-            )
-        response, _ = self.model.complete(prompt, temperature=temp)
-        return response
     
     def sem_perturb(self, user_prompt, prompt_list=None, temp=0):
         forbid_text = ""           
@@ -65,7 +44,6 @@ class SemanticAdapter:
             )
 
         response, _ = self.model.complete(prompt, temperature=temp)
-        logging.info(f"Prompt:\n{prompt}\nResponse:\n{response}")
         return response
     
     def sem_check(self, question_prompt, model_name):
@@ -81,39 +59,39 @@ class SemanticAdapter:
         response, _ = self.model.complete(prompt)
         return response
     
-    def sem_perturb_combined(self, user_prompt, num_semantic) -> List[str]:
-        prompt = (
-            f"Generate variations of the following user prompt "
-            f"by perturbing its semantics while preserving its core intent. Aim to create the most diverse "
-            f"question set.  Respond with {num_semantic} perturbation(s) in json format. Please only respond with the json object. A sample is provided below for 2 perterbations: \n"
-            f"<sample_question>When was Mozart born</sample_question>"
-        )
+    # def sem_perturb_combined(self, user_prompt, num_semantic) -> List[str]:
+    #     prompt = (
+    #         f"Generate variations of the following user prompt "
+    #         f"by perturbing its semantics while preserving its core intent. Aim to create the most diverse "
+    #         f"question set.  Respond with {num_semantic} perturbation(s) in json format. Please only respond with the json object. A sample is provided below for 2 perterbations: \n"
+    #         f"<sample_question>When was Mozart born</sample_question>"
+    #     )
 
-        prompt += '<ans>{"perturbations": ["Care to share the birthdate of Mozart?", "Can you tell me the date when Mozart was born?"]}</ans>'
-        prompt = self.model.format_prompt(
-            user_prompt,
-            state=[{
-                    "role": "system",
-                    "content":prompt
-                }]
-        )
-        for retry_count in range(1, self.MAX_RETRY + 1):
-            response, _ = self.model.complete(prompt)
-            try:
-                # Regex to find the JSON block
-                json_match = re.search(r'{(.*)?}', response, re.DOTALL)
-                if not json_match:
-                    logging.info(f"No JSON object found in the provided text. retry: {retry_count}")
-                json_data = json.loads(json_match.group())
-                if "perturbations" not in json_data:
-                    logging.info(f"The JSON does not contain the key 'perturbations'. retry: {retry_count}")
-                perturbations = json_data["perturbations"]
-                if len(perturbations) != num_semantic:
-                    logging.info(f"length of perterbations is {len(perturbations)} instead of {num_semantic}. retry: {retry_count}")
-                else:
-                    return perturbations
-            except (json.JSONDecodeError, ValueError, KeyError) as e:
-                logging.info(f"Error encountered: {e}. retry: {retry_count}")
-            time.sleep(0.3)
+    #     prompt += '<ans>{"perturbations": ["Care to share the birthdate of Mozart?", "Can you tell me the date when Mozart was born?"]}</ans>'
+    #     prompt = self.model.format_prompt(
+    #         user_prompt,
+    #         state=[{
+    #                 "role": "system",
+    #                 "content":prompt
+    #             }]
+    #     )
+    #     for retry_count in range(1, self.MAX_RETRY + 1):
+    #         response, _ = self.model.complete(prompt)
+    #         try:
+    #             # Regex to find the JSON block
+    #             json_match = re.search(r'{(.*)?}', response, re.DOTALL)
+    #             if not json_match:
+    #                 logging.info(f"No JSON object found in the provided text. retry: {retry_count}")
+    #             json_data = json.loads(json_match.group())
+    #             if "perturbations" not in json_data:
+    #                 logging.info(f"The JSON does not contain the key 'perturbations'. retry: {retry_count}")
+    #             perturbations = json_data["perturbations"]
+    #             if len(perturbations) != num_semantic:
+    #                 logging.info(f"length of perterbations is {len(perturbations)} instead of {num_semantic}. retry: {retry_count}")
+    #             else:
+    #                 return perturbations
+    #         except (json.JSONDecodeError, ValueError, KeyError) as e:
+    #             logging.info(f"Error encountered: {e}. retry: {retry_count}")
+    #         time.sleep(0.3)
             
-        raise RuntimeError(f"sem_perturb_combined: could not generate perturbations after {self.MAX_RETRY} retries")
+    #     raise RuntimeError(f"sem_perturb_combined: could not generate perturbations after {self.MAX_RETRY} retries")

@@ -9,7 +9,7 @@ import torch
 from datetime import datetime as dt
 
 from adapters.SemanticAdapter import SemanticAdapter
-from adapters.OAI_Embeddings import OAIEmbedAdapter
+from adapters.OAI_Embeddings import EmbedAdapter
 
 from similarity.cosine_similarity import similarity
 from langchain_community.retrievers import BM25Retriever
@@ -27,7 +27,7 @@ class RAGAgent:
             self.ner_model  = SemanticAdapter(kwargs.get("ner_model"))
             self.generator = None
         self.query = None
-        self.embedding_adapter = OAIEmbedAdapter()
+        self.embedding_adapter: EmbedAdapter = kwargs.get("embedder")
         self.NER = spacy.load(
             "en_core_web_trf"
         )
@@ -251,6 +251,7 @@ class RAGAgent:
         text = text.format(prompt=prompt)
         return text
     
+    
     def search_query_2(self) -> List[str]:
         text = (
             'You are a helpful assistant whose job is to extract named entities from the given string. '
@@ -319,6 +320,7 @@ class RAGAgent:
 
     def search_entities(self, prompt: str):
         input_text = self.search_query(prompt)
+        print("search_entities")
         answer = self.ner_model.wiki_rag_completions('gpt-3.5-turbo', input_text, prompt)
         return answer
     
@@ -376,6 +378,15 @@ class RAGAgent:
             prompt=prompt, title=title, extracts=extracts
         )
         answer = self.generator.wiki_rag_completions(model_name, input_text, prompt)
+        return answer
+    
+    def answer_using_wiki_2(
+        self, model_name, root_prompt, contriever_closest_matches):
+        contriever_response = self.format_topk_wiki_answer(
+            root_prompt,
+            contriever_closest_matches
+        )
+        answer = self.generator.wiki_rag_completions(model_name, contriever_response, root_prompt)
         return answer
 
 
