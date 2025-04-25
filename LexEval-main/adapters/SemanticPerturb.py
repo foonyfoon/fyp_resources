@@ -1,98 +1,221 @@
-from abc import ABC, abstractmethod
-import random
+import gc
 import math
-from typing import List
+import os
+import pickle
+import random
 import logging
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any, Dict, List
 
-import spacy
-import matplotlib.pyplot as plt
 import numpy as np
-from model.engine import LLMAdapter
-from adapters.WikiKnowledgeGraph import KnowledgeGraph
+import spacy
+import torch
+
 from adapters.OAI_Embeddings import EmbedAdapter
+from adapters.WikiKnowledgeGraph import KnowledgeGraph
+from model.engine import LLMAdapter
 from similarity.cosine_similarity import similarity
 
+# ---------------------------------------------------------------------------
+# Generic helpers
+# ---------------------------------------------------------------------------
+
+def clear_cache() -> None:
+    """Aggressively free CUDA & Python memory."""
+    for obj in gc.get_objects():
+        try:
+            if torch.is_tensor(obj) and obj.is_cuda:
+                del obj
+        except Exception:  # pragma: no cover – best‑effort cleanup
+            pass
+    gc.collect()
+    torch.cuda.empty_cache()
+    free_mem, total_mem = torch.cuda.mem_get_info()
+    logging.info("after clearing cache, %s/%s memory available", free_mem, total_mem)
+
+# ---------------------------------------------------------------------------
+# Core data container
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PromptPackage:
+    """Carries the evolving prompt plus arbitrary metadata/state."""
+
+    text: str
+    state: Dict[str, Any] = field(default_factory=dict)
+
+# ---------------------------------------------------------------------------
+# Abstract base perturber
+# ---------------------------------------------------------------------------
+
 class SemanticPerturber(ABC):
-    @abstractmethod
-    def sem_perturb(self, user_prompt):
-        """
-        Apply a semantic perturbation to the input prompt.
+    """Base class – every perturber works on a :class:`PromptPackage`."""
 
-        Args:
-            user_prompt (str): The input text prompt to be perturbed.
+    def __enter__(self):
+        return self
 
-        Returns:
-            str: The semantically perturbed version of the input prompt.
-        """
-        pass
-    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+
     @abstractmethod
-    def setup_for_tree(self, prompt):
-        pass
-    
+    def setup_for_tree(self, pkg: PromptPackage) -> None:  # noqa: D401 – imperative
+        """Prepare any expensive index/graph before perturbations start."""
+
     @abstractmethod
+    def sem_perturb(self, pkg: PromptPackage, **kwargs) -> PromptPackage:  # noqa: D401
+        """Return a *new* package after semantic perturbation."""
+
+    @abstractmethod
+    def post_process(self) -> None:
+        """Called *once* after the whole tree has been generated."""
+
+    @abstractmethod
+    def release(self) -> None:
+        """Free large buffers/graphs so the GPU can breathe."""
+
+# ---------------------------------------------------------------------------
+# Composite perturber
+# ---------------------------------------------------------------------------
+
+class CombinedPerturber(SemanticPerturber):
+    def __init__(self, perturbations: List[SemanticPerturber]):
+        self.perturbers = perturbations
+
+    def setup_for_tree(self, prompt: str):
+        for p in self.perturbers:
+            p.setup_for_tree(prompt)
+
+    def sem_perturb(self, pkg: PromptPackage, **kwargs) -> PromptPackage:  # noqa: D401
+        for p in self.perturbers:
+            pkg = p.sem_perturb(pkg, **kwargs)
+        return pkg
+
     def post_process(self):
-        pass
+        for p in self.perturbers:
+            p.post_process()
+
+    def release(self):
+        for p in self.perturbers:
+            p.release()
+        clear_cache()
+
+# ---------------------------------------------------------------------------
+# Paraphrase perturber
+# ---------------------------------------------------------------------------
 
 class ParaphrasePerturber(SemanticPerturber):
-    def __init__(self, model):
-        self.model:LLMAdapter=model
+    def __init__(self, model: LLMAdapter, embedder: EmbedAdapter):
+        self.model = model
+        self.embedder = embedder
+        self.prompt_history: list[str] = []  # dedup queue
 
 
-    def setup_for_tree(self, prompt):
-        pass
-    
-    
-    def sem_perturb(self, user_prompt, prompt_list=None, temp=0):
-        forbid_text = ""
-        instruction = (
-            "Generate a variation of the following user prompt "
-            "by perturbing its semantics while preserving its core intent. "
-            "Return just the string of the perturbed prompt."
-        )
-        
-        if prompt_list is not None:
-            forbid_text = "\n".join([f"{idx}. {p}" for idx, p in enumerate(prompt_list, start=1)])
-            instruction += (
-                "\nHowever, there are several sentence variations generated by "
-                "others that you MUST NOT repeat since we want new variations.\n"
-                f"Sentences are in this list:\n{forbid_text}"
+    def setup_for_tree(self, prompt: str):
+        # treat the initial root prompt as already used
+        if prompt not in self.prompt_history:
+            self.prompt_history.append(prompt)
+
+    def sem_perturb(
+        self,
+        pkg: PromptPackage,
+        *,
+        max_retries: int = 5,
+        min_temp: float = 0.7,
+        max_temp: float = 1.5,
+        upper_thresh: float = 0.99,
+        lower_thresh: float = 0.849,
+        **kwargs,
+    ) -> PromptPackage:
+        """Paraphrase until cosine similarity is within the desired band."""
+        retry = 0
+        is_valid = False
+        root_prompt = pkg.state.get("root_prompt", pkg.text)
+
+        def get_paraphrase(prompt: str, temp: float) -> str:
+            forbid_text  = "\n".join(f"{i}. {p}" for i, p in enumerate(self.prompt_history, 1))
+            instruction = (
+                "Generate a variation of the following user prompt "
+                "by perturbing its semantics while preserving its core intent. "
+                "Return just the string of the perturbed prompt."
+            )
+            if forbid_text :
+                instruction += (
+                    "\nHowever, there are several sentence variations generated by others "
+                    "that you MUST NOT repeat since we wna tnew variations Sentence sare "
+                    f"in this list:\n {forbid_text}"
+                )
+
+            chat = self.model.format_prompt(
+                prompt,
+                state=[{"role": "system", "content": instruction}],
+            )
+            new_p, _ = self.model.complete(chat, temperature=temp)
+            return new_p.strip()
+
+        while not is_valid and retry < max_retries:
+            temperature = min(max_temp, min_temp + 1.5 * (retry / max_retries))
+            logging.info("Paraphrase retry %d, temp=%.2f", retry, temperature)
+
+            candidate = get_paraphrase(pkg.text, temperature)
+            sim = similarity(
+                self.embedder.encode(root_prompt),
+                self.embedder.encode(candidate),
+            )
+            
+            is_unique = candidate not in self.prompt_history
+            within_bounds = lower_thresh <= sim <= upper_thresh
+            is_valid = is_unique and within_bounds
+
+            if is_valid:
+                pkg.text = candidate
+                pkg.state["similarity"] = sim
+                pkg.state["is_valid"] = True
+            else:
+                retry += 1
+                if not is_unique:
+                    failure_reason = "duplicate candidate"
+                elif sim < lower_thresh:
+                    failure_reason = f"similarity {sim:.3f} below lower threshold {lower_thresh}"
+                elif sim > upper_thresh:
+                    failure_reason = f"similarity {sim:.3f} above upper threshold {upper_thresh}"
+                else:
+                    failure_reason = "unknown"
+        if not is_valid:
+            logging.info(
+                "generate_semantic_node: could not generate a unique perturbation. Reason: %s",
+                failure_reason,
             )
 
-        prompt = self.model.format_prompt(
-            user_prompt,
-            state=[{
-                "role": "system",
-                "content": instruction
-            }]
-        )
+        return pkg
 
-        response, _ = self.model.complete(prompt, temperature=temp)
-        return response
-    
-    
     def post_process(self):
-        pass
+        self.prompt_history.clear()
 
+    def release(self):
+        if self.model is not None:
+            self.model.cleanup()
+            self.model = None
+        clear_cache()
+
+# ---------------------------------------------------------------------------
+# Knowledge‑prefix perturber
+# ---------------------------------------------------------------------------
 
 class PrefixPerturber(SemanticPerturber):
-    def __init__(self, embdder, tree_size):
-        # resets at every tree
-        self.knowledge_graph = None
-        self.root_embeddings = None
-        
-        # constant
-        self.embedder: EmbedAdapter = embdder
-        self.k_hop = tree_size[0] + 1
-        self.top_k = tree_size[1] + 1
-        self.NER = spacy.load(
-            "en_core_web_trf"
-        )
-    
-        
-    def setup_for_tree(self, prompt):
+    def __init__(self, embedder: EmbedAdapter, tree_size: tuple[int, int]):
+        self.embedder = embedder
+        self.k_hop = tree_size[0] 
+        self.top_k = tree_size[1]
+        self.NER = spacy.load("en_core_web_trf")
+
+        # will be initialised in `setup_for_tree`
+        self.knowledge_graph: KnowledgeGraph | None = None
+        self.root_embeddings: list[np.ndarray] | None = None
+
+    def setup_for_tree(self, prompt: str): 
         entity_list = self.NER(prompt)
-        root_entity = [li.text for li in list(entity_list.ents)][0] 
+        root_entity = [li.text for li in list(entity_list.ents)][0] # first entity  
         # create new knowledge graph instance
         self.knowledge_graph = KnowledgeGraph(
             root_entity,
@@ -101,106 +224,85 @@ class PrefixPerturber(SemanticPerturber):
             prompt=prompt,
             embedder=self.embedder,
         )
-        root_passages = [child.content for child in self.knowledge_graph.graph.children]
-        self.root_embeddings = [self.embedder.encode(rp) for rp in root_passages]
+        root_passages = [c.content for c in self.knowledge_graph.graph.children]
+        self.root_embeddings = [self.embedder.encode(p) for p in root_passages]
 
-    def sem_perturb(self, user_prompt, K=30, T_init=1.0, T_decay=0.9, return_sim=False, prompt_list=None, temp=0):
-        """
-        Perturbs the prompt by swapping its prefix with a candidate document fetched from the knowledge graph.
-        The objective is to minimize the average similarity between the prompt embedding and the provided root embeddings.
-        """
-        # Score function: lower average similarity (more negative) is better.
-        def score_fn(prompt):
+
+    def sem_perturb(
+        self,
+        pkg: PromptPackage,
+        *,
+        K: int = 8,
+        T_init: float = 1.0,
+        T_decay: float = 0.9,
+        **kwargs,
+    ) -> PromptPackage:
+        if not pkg.text:
+            return pkg
+
+        def score(prompt: str) -> float:
             emb = self.embedder.encode(prompt)
-            sims = [similarity(root_emb, emb) for root_emb in self.root_embeddings]
-            return -np.mean(sims)
+            sims = [similarity(r, emb) for r in self.root_embeddings]
+            return -np.mean(sims)  # lower similarity => higher score
 
-        node_visited = set()
-        # Keep the original prompt separate.
-        base_prompt = user_prompt
-        current_prefix = ""  # start with no prefix
-        current_prompt = f"{current_prefix} {base_prompt}".strip()
-        current_score = score_fn(current_prompt)
+        node_visited: set[str] = set()
+        base_prompt = pkg.text
+        current_prefix = ""
+        current_prompt = f"{base_prompt}".strip()
+        current_score = score(current_prompt)
         best_prefix = current_prefix
         best_score = current_score
-
-        # Track the last candidate seen
-        last_candidate = None
-
+        best_idx = -1
+        last_candidate, last_idx = None, None
         T = T_init
 
-        for iteration in range(K):
-            # Retrieve candidate document from the knowledge graph.
-            kg_context, kg_title, kg_content, kg_idx = self.knowledge_graph.get_next_document()
-            # Instead of appending, we swap the prefix.
-            candidate_prefix = kg_context.strip()
-            last_candidate = candidate_prefix  # update last candidate seen
-            if candidate_prefix in node_visited:
+        for _ in range(K):
+            ctx, title, content, idx = self.knowledge_graph.get_next_document()
+            candidate_prefix  = ctx.strip()
+            last_candidate, last_idx = candidate_prefix , idx
+            if candidate_prefix  in node_visited:
                 continue
-            node_visited.add(candidate_prefix)
-            new_prompt = f"{candidate_prefix} {base_prompt}"
-            new_score = score_fn(new_prompt)
-
-            # Acceptance probability via simulated annealing.
+            node_visited.add(candidate_prefix )
+            new_prompt = f"{candidate_prefix } {base_prompt}"
+            new_score = score(new_prompt)
             delta = new_score - current_score
             p_accept = min(1, math.exp(math.exp(delta / T)))
-
             if random.random() < p_accept:
-                current_prefix = candidate_prefix  # swap prefix
-                current_prompt = new_prompt
-                current_score = new_score
-
-                # Update best if improved.
+                current_prefix, current_prompt, current_score = candidate_prefix , new_prompt, new_score
                 if current_score > best_score:
-                    best_score = current_score
-                    best_prefix = current_prefix
+                    best_prefix, best_score, best_idx = current_prefix, current_score, idx
+            T *= T_decay
 
-            T *= T_decay  # decay the temperature
+        if not best_prefix.strip() and last_candidate:
+            best_prefix, best_idx = last_candidate, last_idx
+        if best_idx == -1:
+            _, _, _, best_idx = self.knowledge_graph.get_next_document()
 
-        # If best_prefix is empty or whitespace, use the last seen candidate (if it's not empty)
-        if not best_prefix.strip() and last_candidate is not None and last_candidate.strip():
-            best_prefix = last_candidate
+        self.knowledge_graph.update_visit_status(best_idx)
 
-        self.knowledge_graph.update_visit_status(best_prefix)
-        best_prompt = f"{best_prefix} {base_prompt}".strip()
-        best_similarity = -best_score  # convert back to similarity
+        pkg.text = f"{best_prefix} {base_prompt}".strip()
+        pkg.state["prefix_similarity"] = -best_score  # positive similarity
+        return pkg
 
-        if return_sim:
-            return best_prompt, best_similarity
-        else:
-            return best_prompt
 
     def post_process(self):
-    # Save the boolean array of ordered docs visited as a heatmap image.
-    # The heatmap is saved with the knowledge graph's root entity as the filename.
-        if self.knowledge_graph is not None:
-            # Retrieve the visited flags from the knowledge graph.
-            visited_flags = self.knowledge_graph._visited_doc_flags
-            # Convert to a NumPy array and reshape it into a 2D array (a single row).
-            heatmap_data = np.array(visited_flags, dtype=int).reshape(1, -1)
-            
-            plt.figure(figsize=(10, 2))
-            # Display the heatmap. For a boolean array, using a colormap like 'viridis' can help highlight visited (1) vs. not visited (0).
-            plt.imshow(heatmap_data, cmap='viridis', aspect='auto')
-            plt.colorbar(label='Visited (1=True, 0=False)')
-            plt.title('Knowledge Graph Document Visitation')
-            plt.xlabel('Document Index')
-            plt.yticks([])  # Hide the y-axis ticks since it's a single row
-            
-            # Determine the filename based on the knowledge graph's root entity.
-            if hasattr(self.knowledge_graph.graph, 'title'):
-                filename = f"{self.knowledge_graph.graph.title}_heatmap.png"
-            else:
-                filename = "knowledge_graph_heatmap.png"
-                
-            plt.savefig(filename)
-            plt.close()
-            print(f"Heatmap saved as {filename}")
+        if not self.knowledge_graph:
+            return
+        title = getattr(self.knowledge_graph.graph, "title", "kg")
+        out_dir = "/vol/bitbucket/lst20/graph"
 
-        # Clean up resources.
+        with open(os.path.join(out_dir, f"{title}_kg.pkl"), "wb") as f:
+            pickle.dump(self.knowledge_graph, f)
+
+        # nothing else to keep
+        del self.knowledge_graph, self.root_embeddings
+        self.knowledge_graph, self.root_embeddings = None, None
+
+    def release(self):
         if self.knowledge_graph is not None:
             del self.knowledge_graph
+            self.knowledge_graph = None
         if self.root_embeddings is not None:
             del self.root_embeddings
-            
-            
+            self.root_embeddings = None
+        clear_cache()

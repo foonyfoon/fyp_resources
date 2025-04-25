@@ -1,4 +1,3 @@
-import wikipedia
 import numpy as np
 from nltk.tokenize import sent_tokenize
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -6,6 +5,7 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import concurrent.futures
 import torch
+import wikipedia
 
 from collections import deque
 from typing import List
@@ -14,7 +14,7 @@ import time
 import logging
 
 from adapters.OAI_Embeddings import EmbedAdapter
-
+from utils.wiki_helper import WikiHelper
 class RootNode:
     def __init__(self, title: str):
         self.title = title
@@ -54,8 +54,7 @@ class RootNode:
         nx.draw(G, pos, with_labels=True, node_color='lightblue', arrows=True, node_size=800, font_size=5)
         plt.title("Graph Visualization Using NetworkX")
         plt.show()
-
-    
+   
 class PageNode:
     def __init__(self, title: str, summary: str, content: str, url: str):
         self.title = title
@@ -70,17 +69,17 @@ class PageNode:
     def add_child(self, node):
         self.children.append(node)
 
-
 class KnowledgeGraph: 
     '''
     each knowledge graph is created per root prompt and stored there
     '''
     def __init__(self, entity: str, **kwargs):
-        k_hop, top_k = kwargs.get("k_hop", 2), kwargs.get("top_k", 2)
-        self.graph = self.create_graph(entity, k_hop, top_k)
         prompt: str = kwargs.get("prompt")
-        embedder: EmbedAdapter = kwargs.get("embedder")
-        self.ordered_docs = self.get_ordered_docs(prompt=prompt, embedder=embedder)
+        k_hop, top_k = 2, 3
+        self.embedder = kwargs.get("embedder")
+        self.wiki_helper = WikiHelper(self.embedder)
+        self.graph = self.create_graph(entity, k_hop, top_k)
+        self.ordered_docs = self.get_unordered_docs(prompt=prompt, embedder=self.embedder)
         # Initialize a boolean array for tracking visited documents:
         self.visited_doc_flags = [False] * len(self.ordered_docs)
         
@@ -98,12 +97,21 @@ class KnowledgeGraph:
 
 
     def rank_sentences_by_tfidf(self, article: str) -> List[str]:
-        sentences = sent_tokenize(article)
+        # Split on newline, tokenize each non-empty line, and flatten
+        raw_lines = article.split('\n')
+        sentences = []
+        for line in raw_lines:
+            line = line.strip()
+            if not line:
+                continue
+            for sent in sent_tokenize(line):
+                # 2) Discard any sentence shorter than 5 characters
+                if len(sent) >= 5:
+                    sentences.append(sent)
         vectorizer = TfidfVectorizer()
         # Compute TF-IDF matrix
         tfidf_matrix = vectorizer.fit_transform(sentences)
-        # Compute the average TF-IDF score for each sentence
-        # https://aclanthology.org/P04-1049.pdf
+        # Compute the average TF-IDF score for each sentence https://aclanthology.org/P04-1049.pdf
         sentence_scores = np.sum(tfidf_matrix.toarray(), axis=1)  
         # Sort sentences by their scores in descending order
         ranked_sentences = [(score, sentence) for score, sentence in sorted(zip(sentence_scores, sentences), reverse=True)]
@@ -111,10 +119,11 @@ class KnowledgeGraph:
         return ranked_sentences
 
 
-    def get_k_documents(self, corpus: str, top_k=8) -> str:
+    def get_k_documents(self, corpus: List[str], top_k: int = 50) -> List[str]:
         # use rank_sentences_by_tfidf to get top_k doc
         sentences = self.rank_sentences_by_tfidf(corpus)
-        return sentences[:top_k]
+        top_k_ret = min(len(sentences), top_k)
+        return sentences[:top_k_ret]
 
 
     def create_graph(self, start_entity: str, k_hop: int, top_k: int):
@@ -123,47 +132,33 @@ class KnowledgeGraph:
         '''
         start_time = time.time()
         
-        def fetch_wiki_page_with_retry(page_title: str, max_retries=3, base_delay=1, max_delay=8):
-            """
-            Attempts to fetch a Wikipedia page for the given title with retry logic.
-            If a DisambiguationError or PageError occurs, returns None immediately.
-            For other exceptions, retries with exponential backoff and jitter.
-            """
-            attempt = 0
-            while True:
-                if attempt >= max_retries:
-                    logging.error(f"Max retries exceeded for '{page_title}'.")
-                    return None
-                try:
-                    # Attempt to fetch the Wikipedia page
-                    return wikipedia.page(page_title)
-                except wikipedia.exceptions.DisambiguationError:
-                    return None
-                except wikipedia.exceptions.PageError:
-                    return None
-                except Exception as e:
-                    attempt += 1
-                    delay = min(base_delay * 2 ** attempt, max_delay)
-                    delay += random.uniform(0, 1)
-                    logging.info(f"Error fetching page '{page_title}': {e}. Retrying in {delay:.2f} seconds (attempt {attempt}/{max_retries}).")
-                    time.sleep(delay)
+        # tree_size = sum([pow(size[1], exponent) for exponent in range(size[0])]) - 1 # not counting root
+        # num_kg_nodes = sum([pow(kg_size[1], exponent) for exponent in range(kg_size[0])]) - 1 # nor counting root and first layer
+        # doc_per_tree_node = 10
+        # num_preturb_tree_node = num_kg_nodes
         
         # 1. Initialize root node with the start entity
         root = RootNode(start_entity)
-        root.visited = set([start_entity])
+        root.visited = {start_entity}
         queue = deque()
+        
         pages = wikipedia.search(start_entity, results=top_k)
+        print(f"create_graph root pages: {pages}")
         
         # 2. Fetch relevant pages related to the start entity
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = {executor.submit(fetch_wiki_page_with_retry, title): title for title in pages}
+            futures = {executor.submit(self.wiki_helper.fetch_wiki_page_with_retry, title): title for title in pages}
             for future in concurrent.futures.as_completed(futures):
                 wiki_page = future.result()
                 if not wiki_page:
                     continue  # Skip pages that couldn't be fetched or are ambiguous.
-                node = PageNode(wiki_page.title, wiki_page.summary, wiki_page.content, wiki_page.url)
+                node = PageNode(wiki_page['title'],
+                                wiki_page['summary'],
+                                wiki_page['content'],
+                                wiki_page['url'])
                 node.document_list = self.get_k_documents(node.content)
                 root.add_child(node)
+                root.visited.add(wiki_page['title'])
                 queue.append((node, wiki_page))
         
         # 3. BFS expansion
@@ -172,106 +167,87 @@ class KnowledgeGraph:
             while queue:
                 parent_node, parent_page = queue.popleft()
                 try:
-                    links = list(set(parent_page.links))
+                    links = list(set(parent_page["links"]))
                 except wikipedia.exceptions.DisambiguationError:
-                    continue
-
+                    logging.info("create_graph: wikipedia.exceptions.DisambiguationError: no links?")
                 link_weights = []
                 valid_links = []
                 for link in links:
                     if link not in root.visited:
                         try:
-                            weight = self.link_importance(link, parent_page.content)
+                            weight = self.link_importance(link, parent_page["content"])
                             link_weights.append(weight)
                             valid_links.append(link)
                         except Exception:
-                            continue
+                            logging.info("create_graph: Exception weights")
 
                 # Sort valid_links based on weights and select the top_k links.
                 sorted_indices = sorted(range(len(link_weights)), key=lambda i: link_weights[i])
                 top_indices = sorted_indices[:min(len(valid_links), top_k)]  # Use valid_links length here.
                 top_links = [valid_links[i] for i in top_indices]
-            
                 with concurrent.futures.ThreadPoolExecutor() as executor:
-                    futures = {executor.submit(fetch_wiki_page_with_retry, link): link for link in top_links}
+                    futures = {executor.submit(self.wiki_helper.fetch_wiki_page_with_retry, link): link for link in top_links}
                     for future in concurrent.futures.as_completed(futures):
                         child_page = future.result()
                         if not child_page:
                             continue  # Skip pages that couldn't be fetched or are ambiguous.
-                        
-                        # Retrieve the corresponding link for this future.
-                        link = futures[future]
-                        
-                        child_node = PageNode(child_page.title, child_page.summary, child_page.content, child_page.url)
+                        child_node = PageNode(child_page["title"], child_page["summary"], child_page["content"], child_page["url"])
                         # Generate passages (passage, tfidf score)
-                        child_node.document_list = self.get_k_documents(child_page.content)
+                        child_node.document_list = self.get_k_documents(child_page["content"])
                         parent_node.add_child(child_node)
-                        root.visited.add(link)
                         to_process.append((child_node, child_page))
+                        
+                for tl in top_links:
+                    root.visited.add(tl)
                         
             queue = to_process
 
-        print(f"--- create graph: {time.strftime('%H:%M:%S', time.gmtime(time.time() - start_time))} seconds ---")
+        print(f"--- create graph: {time.strftime('%H:%M:%S', time.gmtime(time.time() - start_time))} ---")
         return root
 
+        
+    def get_unordered_docs(self, **kwargs):
+        """
+        Proposes next documents for the perturber to add to the prompt.
+        Documents are collected via a breadth-first traversal of the document tree,
+        and returned in the order they are encountered (no similarity-based sorting).
 
-    
-    def get_ordered_docs(self, strategy="similarity", **kargs):
-        '''
-        proposes next document for preturber to add to prompt, if prompt is accepted, mark sentence as visited
-        '''
-        # Collect all docs by traversing the tree in a breadth-first style.
+        Returns:
+            List[Tuple[str, str, str]]:
+                A list of tuples each containing:
+                - Document text,
+                - Document title, and
+                - Document content.
+        """
+        import time
+        from collections import deque
+
         start_time = time.time()
         doc_db = []
         title_db = []
         content_db = []
         
-        # Get the set of titles from the root's direct children.
-        direct_children_titles = set()
-        for child in self.graph.children:
-            direct_children_titles.add(child.title)
+        # Get the set of titles from the root's direct children to avoid collecting their document lists.
+        direct_children_titles = {child.title for child in self.graph.children}
         queue = deque([self.graph])
+        
         while queue:
             node = queue.popleft()
-            if isinstance(node, PageNode) and node.title not in direct_children_titles: #Skip node's document list if at hop 1
-                title_db.append(node.title)
+            # If node is a PageNode and not a direct child of the root,
+            # collect its document sentences.
+            if isinstance(node, PageNode) and node.title not in direct_children_titles:
                 for entry in node.document_list:
-                    # entry is (score, sentence)
+                    # Each entry is assumed to be a tuple (score, sentence); we use the sentence.
                     doc_db.append(entry[1])
-                    content_db.append(node.content)      
+                    title_db.append(node.title)
+                    content_db.append(node.content)
+            # Add child nodes to the queue for further traversal.
             for child in node.children:
-                    queue.append(child)
-                                           
-        if strategy == "similarity":
-            prompt: str = kargs.get("prompt")
-            embedder: EmbedAdapter = kargs.get("embedder") #(returns embbedding with embedder.embed(sentence))
-            # Get the embedding for the prompt.
-            prompt_embedding =  torch.tensor(embedder.encode(prompt) ) # Assume shape (d,)
-            
-            # Generate embeddings for each document.
-            doc_embeddings = []
-            for doc in doc_db:
-                doc_embedding = embedder.encode(doc)
-                doc_tensor = torch.tensor(doc_embedding)
-                doc_embeddings.append(doc_tensor)
-            
-            print(f"len(doc_embeddings), len(doc_db): {len(doc_embeddings), len(doc_db)}")
-            # Stack embeddings into a single tensor of shape (N, d).
-            db_embeddings = torch.stack(doc_embeddings, dim=0)
-            # Compute sot product similarity between each doc and the prompt.
-            if prompt_embedding.dim() == 1:
-                prompt_embedding = prompt_embedding.unsqueeze(0)
-            similarities = torch.matmul(db_embeddings, prompt_embedding.mT).squeeze()  # shape (N,)
-            
-            # Sort documents by similarity in ascending order (least similar first).
-            sorted_indices = torch.argsort(similarities, descending=False)
-            ordered_document_list = [(doc_db[i], float(similarities[i].item()), title_db[i], content_db[i]) for i in sorted_indices]
-            print(f"--- get_ordered_docs: {time.strftime('%H:%M:%S', time.gmtime(time.time() - start_time))} seconds ---")
-            return ordered_document_list
-             
-        else:
-            raise NotImplementedError(f"Strategy {strategy} not implemented.")
+                queue.append(child)
         
+        unordered_docs = [(doc_db[i], title_db[i], content_db[i]) for i in range(len(doc_db))]
+        print(f"--- get_unordered_docs: {time.strftime('%H:%M:%S', time.gmtime(time.time() - start_time))} seconds ---")
+        return unordered_docs
 
     def get_next_document(self):
         """
@@ -283,7 +259,7 @@ class KnowledgeGraph:
             raise RuntimeError(f"All documents are visited. doclist length = {len(self.ordered_docs)}")
         # Randomly select an available document's index.
         selected_index = random.choice(available_indices)
-        doc, sim, title, content = self.ordered_docs[selected_index]
+        doc, title, content = self.ordered_docs[selected_index]
         return (doc, title, content, selected_index)
 
 

@@ -10,6 +10,7 @@ class Node:
         self.rag_entities = None
         self.ner_entities = None
         self.answers = {}
+        self.metadata = {}
         
 
     def add_child(self, child):
@@ -20,6 +21,7 @@ class Node:
 class RootNode(Node):
     def __init__(self,
                  prompt,
+                 wiki_title=[],
                  complexity_score=0,
                  fk_score=0,
                  dc_score=0):
@@ -29,6 +31,7 @@ class RootNode(Node):
         self.complexity_score = complexity_score,
         self.fk_score = fk_score,
         self.dc_score = dc_score
+        self.wiki_title = wiki_title
     
     def to_dict(self):
         return {
@@ -44,7 +47,8 @@ class RootNode(Node):
             "root_similarity_score": self.root_similarity_score,
             "complexity_score": self.complexity_score,
             "fk_score": self.fk_score,
-            "dc_score": self.dc_score
+            "dc_score": self.dc_score,
+            "wiki_title": self.wiki_title
         }
 
 
@@ -59,10 +63,12 @@ class SemanticNode(Node):
         rag_closest_match,
         rag_entities,
         ner_entities,
+        wiki_title,
         parent=None,
         complexity_score=0,
         fk_score=0,
-        dc_score=0
+        dc_score=0,
+        is_duplicate=False
         
     ):
         super().__init__("semantic", prompt, parent)
@@ -76,6 +82,8 @@ class SemanticNode(Node):
         self.complexity_score = complexity_score
         self.fk_score = fk_score
         self.dc_score = dc_score
+        self.wiki_title = wiki_title
+        self.is_duplicate = is_duplicate
 
     def to_dict(self):
         return {
@@ -93,7 +101,8 @@ class SemanticNode(Node):
             "threshold": self.threshold,
             "complexity_score": self.complexity_score,
             "fk_score": self.fk_score,
-            "dc_score": self.dc_score
+            "dc_score": self.dc_score,
+            "wiki_title": self.wiki_title
         }
         
 
@@ -104,6 +113,7 @@ class SyntacticNode(Node):
         syntax_similarity_score,
         threshold,
         rag_closest_match,
+        wiki_title,
         rag_entities,
         ner_entities,
         parent=None,
@@ -114,6 +124,7 @@ class SyntacticNode(Node):
         self.rag_closest_match = rag_closest_match
         self.rag_entities = rag_entities
         self.ner_entities = ner_entities
+        self.wiki_title = wiki_title
     
     def to_dict(self):
         return {
@@ -127,5 +138,7 @@ class SyntacticNode(Node):
             "ner_entities": self.ner_entities,
             "answers": self.answers,
             "syntax_similarity_score": self.syntax_similarity_score,
-            "threshold": self.threshold
+            "threshold": self.threshold,
+            "wiki_title": self.wiki_title
+            
         }

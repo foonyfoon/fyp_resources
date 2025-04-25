@@ -4,45 +4,68 @@ import time
 import os
 import logging
 from abc import ABC, abstractmethod
+from typing import Tuple
+import logging
+import pickle
+import io
 
 import networkx as nx
 import matplotlib.pyplot as plt
 import textstat
-import pickle
+import torch
 from rouge_score import rouge_scorer
 from nltk.translate.bleu_score import corpus_bleu
 
 from adapters.SemanticAdapter import SemanticAdapter
-from adapters.OAI_Embeddings import EmbedAdapter, RobertaEmbedder
+from adapters.SemanticPerturb import PromptPackage, SemanticPerturber
+from adapters.OAI_Embeddings import EmbedAdapter
 from similarity.cosine_similarity import similarity
+from utils.timer import Timers
 from adapters.rag import RAGAgent
 from tree.node import RootNode, SyntacticNode, SemanticNode
 
-class AbstractTree(ABC): 
+
+class AbstractTree(ABC):
     def print_tree(self, node=None, level=0, model_name=None, truncate_passage=True):
         def _tuncate_wiki_page(page: tuple, max_char=45) -> tuple:
             """
             used only in print_tree() to truncate long title, content and summary of wiki page
             input: (wikipage, sim_score): tuple
             """
-            return ({
-                **page[0],
-                "summary": page[0]["summary"] if len(page[0]["summary"]) <= max_char else page[0]["summary"][:max_char] + "...",
-                "content": page[0]["content"] if len(page[0]["content"]) <= max_char else page[0]["content"][:max_char] + "...",
-                "title": page[0]["title"] if len(page[0]["title"]) <= max_char else page[0]["title"][:max_char] + "..."
-            }, page[1])
+            return (
+                {
+                    "context": (
+                        page[0]["context"]
+                        if len(page[0]["context"]) <= max_char
+                        else page[0]["context"][:max_char] + "..."
+                    ),
+                    "title": (
+                        page[0]["title"]
+                        if len(page[0]["title"]) <= max_char
+                        else page[0]["title"][:max_char] + "..."
+                    ),
+                },
+                page[1],
+            )
+
         if node is None:
             node = self.root
 
         indent = "  " * level
         print(f"{indent}{node.id} - {node.prompt} ({node.__class__.__name__})")
-            
+
         if isinstance(node, (RootNode, SemanticNode)):
-            closest_match = list(map(_tuncate_wiki_page, node.rag_closest_match)) if truncate_passage is True else node.rag_closest_match
+            closest_match = (
+                list(map(_tuncate_wiki_page, node.rag_closest_match))
+                if truncate_passage is True
+                else node.rag_closest_match
+            )
             print(f"{indent}{node.id} - {node.prompt}:")
             print(f"{indent}- RAG({closest_match})")
             print(f"{indent}- NER({node.rag_entities})")
-            print(f"{indent}complexity_score: {node.complexity_score}, dc_score: {node.dc_score}, fk_score: {node.fk_score}")
+            print(
+                f"{indent}complexity_score: {node.complexity_score}, dc_score: {node.dc_score}, fk_score: {node.fk_score}"
+            )
         else:
             print(f"{indent}{node.id} - {node.prompt} - NER({node.rag_entities})")
         for model, answer in node.answers.items():
@@ -51,29 +74,47 @@ class AbstractTree(ABC):
         for child in node.children:
             self.print_tree(child, level + 1, model_name, truncate_passage)
 
+
 class ReadTree(AbstractTree):
     def __init__(self, root_prompt, prev_state=None):
         self.root_prompt = root_prompt
         self.root = RootNode(root_prompt) if prev_state is None else prev_state["root"]
         self.thresholds = [] if prev_state is None else prev_state["thresholds"]
-        self.prompt_list = [root_prompt] if prev_state is None else prev_state["prompt_list"]
+        self.prompt_list = (
+            [root_prompt] if prev_state is None else prev_state["prompt_list"]
+        )
         self.time_semantic = 0 if prev_state is None else prev_state["time_semantic"]
         self.time_syntactic = 0 if prev_state is None else prev_state["time_syntactic"]
         self.time_check = {} if prev_state is None else prev_state["time_check"]
         self.metrics = {} if prev_state is None else prev_state["metrics"]
-        self.possible_answers = {} if prev_state is None else prev_state["possible_answers"]
+        self.possible_answers = (
+            {} if prev_state is None else prev_state["possible_answers"]
+        )
         self.rag_entities = [] if prev_state is None else prev_state["rag_entities"]
         self.ner_entities = [] if prev_state is None else prev_state["ner_entities"]
-        self.rag_closest_match = [] if prev_state is None else prev_state["rag_closest_match"]
-        
+        self.rag_closest_match = (
+            [] if prev_state is None else prev_state["rag_closest_match"]
+        )
+
     @staticmethod
-    def load_read_tree(file_path):
-        prev_state = {}
-        with open(file_path, "rb") as file:
-            prev_state = pickle.load(file)
-        root_prompt = prev_state["root_prompt"]
-        return ReadTree(root_prompt, prev_state=prev_state)
-    
+    def load_read_tree(file_path: str) -> "ReadTree":
+        """
+        Load a pickled ReadTree, forcing every tensor inside to CPU.
+        Works even if the file was written on a CUDA box.
+        """
+        class _CPUUnpickler(pickle.Unpickler):
+            def find_class(self, module, name):
+                if module == 'torch.storage' and name == '_load_from_bytes':
+                    # route all tensor blobs through torch.load(..., map_location='cpu')
+                    return lambda b: torch.load(io.BytesIO(b), map_location='cpu')
+                return super().find_class(module, name)
+
+        with open(file_path, "rb") as fh:
+            prev_state = _CPUUnpickler(fh).load()
+
+        return ReadTree(prev_state["root_prompt"], prev_state=prev_state)
+
+
 class Tree(AbstractTree):
     def __init__(self, root_prompt, **kwargs):
         # answer model
@@ -83,56 +124,61 @@ class Tree(AbstractTree):
             self.rag = RAGAgent(eval=True, generator=self.generator)
             self.base = SemanticAdapter(self.generator)
         else:
-            # uses llm for NER
-            self.rag = RAGAgent(eval=False,
-                                ner_model=kwargs.get("ner_model"),
-                                embedder=kwargs.get("embedder"),
-                                )
+            self.rag = RAGAgent(
+                eval=False,
+                ner_model=kwargs.get("ner_model"),
+                embedder=kwargs.get("embedder"),
+            )
             # preturb model
-            self.sem_perturber = kwargs.get("sem_perturber")
+            self.sem_perturber: SemanticPerturber = kwargs.get("sem_perturber")
+            self.sem_perturber.setup_for_tree(root_prompt)
             self.syn_perturber = kwargs.get("syn_perturber")
-            
-        self.embed_model = kwargs.get("embedder") 
+            s_uri_code = kwargs.get("s_uri_code")
+
+        self.embed_model: EmbedAdapter = kwargs.get("embedder")
         self.root_prompt = root_prompt
         self.num_semantic = 0
         self.num_syntactic = 0
-        
+
         prev_state = kwargs.get("prev_state", None)
         self.root = RootNode(root_prompt) if prev_state is None else prev_state["root"]
         self.root.embedding = self.embed_model.encode(root_prompt)
-        
+
         if is_eval and prev_state is not None:
             self.rag_entities = prev_state.get("rag_entities")
             self.ner_entities = prev_state.get("ner_entities")
             self.root.rag_closest_match = prev_state.get("rag_closest_match")
+            self.root.wiki_title = prev_state.get("wiki_title")
         elif not is_eval:
             # Otherwise, run retriever pipeline
-            wiki_data = self.rag.retrieve_wiki_data(root_prompt)
-            closest_match = self.rag.find_most_relevant_page(
-                wiki_data=wiki_data, prompt=root_prompt
-            )
+            wiki_data = self.rag.retrieve_wiki_data_2(root_prompt)
+            closest_match = self.rag.find_gt_passage(s_uri_code, root_prompt)
             self.rag_entities = self.rag.search_entities_2(prompt=root_prompt)
             self.ner_entities = self.rag.search_entities_NER(prompt=root_prompt)
             self.root.rag_closest_match = closest_match
-        
+            self.root.wiki_title = [w["title"] for w in wiki_data]
+
         self.thresholds = [] if prev_state is None else prev_state["thresholds"]
-        self.prompt_list = [root_prompt] if prev_state is None else prev_state["prompt_list"]
+        self.prompt_list = (
+            [root_prompt] if prev_state is None else prev_state["prompt_list"]
+        )
         self.time_semantic = 0 if prev_state is None else prev_state["time_semantic"]
         self.time_syntactic = 0 if prev_state is None else prev_state["time_syntactic"]
         self.time_check = {} if prev_state is None else prev_state["time_check"]
         self.metrics = {} if prev_state is None else prev_state["metrics"]
-        self.possible_answers = {} if prev_state is None else prev_state["possible_answers"]
+        self.possible_answers = (
+            {} if prev_state is None else prev_state["possible_answers"]
+        )
 
-        
     def set_possible_answers(self, possible_answers):
         self.possible_answers = possible_answers
 
-    def make_tree(self, depth, num_semantic, num_syntactic, model_name='gpt-3.5-turbo'):
+    def make_tree(self, depth, num_semantic, num_syntactic, index):
         start_time = time.time()
         self.num_semantic = num_semantic
         self.num_syntactic = num_syntactic
-        self.thresholds = self.make_thresholds("linear", 1.0, 0.96, depth)
-        
+        self.thresholds = self.make_thresholds("linear", 0.97, 0.84, depth)
+
         # Calculate Flesch-Kincaid Grade Level and Dale-Chall Readability Score
         fk_score = textstat.flesch_kincaid_grade(self.root.prompt)
         dc_score = textstat.dale_chall_readability_score(self.root.prompt)
@@ -150,36 +196,61 @@ class Tree(AbstractTree):
                 continue
 
             upper_thresh = 0.96
-            lower_thresh = 0.8
+            lower_thresh = 0.849
 
             # generate semantic children
             for _ in range(self.num_semantic):
-                semantic_node = self.generate_semantic_node(node, upper_thresh, lower_thresh)
+
+                Timers.start(index, "create tree", "generate_semantic_node")
+                semantic_node, have_children = self.generate_semantic_node(
+                    self.root.prompt, node, upper_thresh, lower_thresh, index
+                )
+                Timers.end(index, "create tree", "generate_semantic_node")
                 node.add_child(semantic_node)
                 # semantic node can have children
-                queue.append((semantic_node, level + 1))
+                if have_children:
+                    queue.append((semantic_node, level + 1))
             sem_time = time.time()
-            
+
             # generate syntactic children
             for _ in range(num_syntactic):
                 syntactic_node = self.generate_syntactic_node(node)
                 node.add_child(syntactic_node)
-
             syn_time = time.time()
 
         self.time_semantic = sem_time - start_time
         self.time_syntactic = syn_time - sem_time
+        self.sem_perturber.post_process()
         print("Time to create semantic nodes: ", sem_time - start_time)
         print("Time to create syntactic nodes: ", syn_time - sem_time)
         print("Total time: ", syn_time - start_time)
-      
-    def generate_syntactic_node(self, node):
+
+    def construct_retrieved_evidence(
+        self, index, wiki_data, perturbation, k_docs=4, correct_docs=1
+    ):
+        # list of tuple of {title: context} dict and sim_score of doc with prompt
+        ground_truth_docs = self.root.rag_closest_match
+        # Use however many ground truth docs are available.
+        extraneous_needed = k_docs - correct_docs
+        # filter out wiki data in ground_truth_docs from wiki_data before doing topK
+        gt_set = {doc_tuple[0]["title"] for doc_tuple in ground_truth_docs}
+        wiki_data = [doc for doc in wiki_data if doc.get("title") not in gt_set]
+        Timers.start(index, "create tree", "find_topk_relevant_pages")
+        # list of tuple of {title: context} dict and sim_score of doc with prompt
+        extraneous_docs = self.rag.find_topk_relevant_pages(
+            wiki_data, perturbation, top_k=extraneous_needed
+        )
+        Timers.start(index, "create tree", "find_topk_relevant_pages")
+        combined_docs = ground_truth_docs + extraneous_docs
+        return combined_docs
+
+    def generate_syntactic_node(self, node, index):
         syn_perturb = self.syn_perturber.syn_perturb(
-                    text=node.prompt,
-                    butterfinger=self.syn_perturber.butterfinger,
-                )
-        wiki_data = self.rag.retrieve_wiki_data_2(syn_perturb)     
-        closest_match = self.rag.find_topk_contriever_matches(wiki_data, syn_perturb)
+            text=node.prompt,
+            butterfinger=self.syn_perturber.butterfinger,
+        )
+        wiki_data = self.rag.retrieve_wiki_data_2(syn_perturb)
+        closest_match = self.construct_retrieved_evidence(0, wiki_data, syn_perturb)
         rag_entities = self.rag.search_entities_2(prompt=syn_perturb)
         ner_entities = self.rag.search_entities_NER(prompt=syn_perturb)
         rag_closest_match = closest_match
@@ -191,79 +262,84 @@ class Tree(AbstractTree):
             rag_closest_match=rag_closest_match,
             rag_entities=rag_entities,
             ner_entities=ner_entities,
+            wiki_title=[w["title"] for w in wiki_data],
         )
         return syntactic_node
-                
-    def generate_semantic_node(self, parent_node, upper_thresh, lower_thresh):
+
+    def generate_semantic_node(
+        self, root_prompt, parent_node: SemanticNode, upper_thresh, lower_thresh, index
+    ) -> Tuple[SemanticNode, bool]:
         """
         Generates a valid semantic perturbation and creates a SemanticNode.
         """
-        root_embedding = self.root.embedding
+        have_children = True
         original_prompt = parent_node.prompt
-        retry_count = 0
-        max_retries = 5
-        max_temp = 1.5
-        is_valid = False
         
-        current_prompt = original_prompt
+        #####################################################################
+        Timers.start(index, "create tree", "prompt_perturbation")
+        perturb_pkg = PromptPackage(text=original_prompt,
+                            state={"root_prompt": root_prompt})
+        perturbation = self.sem_perturber.sem_perturb(perturb_pkg)
+        # unpack results
+        perturbation = perturb_pkg.text           # the new prompt
+        perturb_state = perturb_pkg.state          # metadata collected by perturbers
+        
+        perturb_embedding = self.embed_model.encode(perturbation)
         parent_embedding = parent_node.embedding
+        root_embedding = self.root.embedding
+        sem_sim = similarity(perturb_embedding, parent_embedding)
+        root_sim = similarity(perturb_embedding, root_embedding)
 
-        while not is_valid and retry_count < max_retries:
-            # get perturbation (initial or retry with temperature)
-            temp = min(max_temp, 1.2 * ((1 + retry_count) / max_retries)) 
-            print(f"generate_semantic_node: retry at {retry_count} with temp={temp}")
-            perturbation = self.sem_perturber.sem_perturb(current_prompt, prompt_list=self.prompt_list, temp=temp)
-            perturbation = perturbation.strip()
-
-            # calc embeddings and similarities
-            perturb_embedding = self.embed_model.encode(perturbation)
-            root_sim = similarity(root_embedding, perturb_embedding)
-            sem_sim = similarity(parent_embedding, perturb_embedding)
-
-            is_valid = (
-                # (lower_thresh <= sem_sim and sem_sim <= upper_thresh) and   # semantic similarity range check
-                # (parent_node.root_similarity_score < root_sim) and          # similarity distance check      
-                (perturbation not in self.prompt_list)                        # duplicate check
-            )
-
-            if is_valid:
-                self.prompt_list.append(perturbation)
-                break
-            else:
-                retry_count += 1
-                # move prompt to first in self.prompt_list to accomodate for "lost in the middle"
-                if perturbation in self.prompt_list: 
-                    self.prompt_list.remove(perturbation)
-                    self.prompt_list.insert(0, perturbation)
-        
-        if perturbation in self.prompt_list and retry_count >= max_retries:
-            raise RuntimeError(f"generate_semantic_node: could not generate a unique perturbation"
-                               f"after {retry_count} retries, of prompt list (len={len(self.prompt_list)}, list={self.prompt_list}, sem_sim={sem_sim})")
-
+        is_valid =  (perturbation not in self.prompt_list    # duplicate check
+                    and perturb_state.get("is_valid", True)) # perturber-level checks passed
+    
+        if is_valid:
+            self.prompt_list.append(perturbation)
+        else:
+            have_children = False
+        Timers.end(index, "create tree", "prompt_perturbation")
+        #####################################################################
         # Calculate Flesch-Kincaid Grade Level and Dale-Chall Readability Score
         fk_score = textstat.flesch_kincaid_grade(perturbation)
         dc_score = textstat.dale_chall_readability_score(perturbation)
         complexity_score = (fk_score + dc_score) / 2
-        
+
+        Timers.start(index, "create tree", "retrieve_wiki_data_post_perturb")
         wiki_data = self.rag.retrieve_wiki_data_2(perturbation)
-        closest_match = self.rag.find_topk_contriever_matches(wiki_data, perturbation)
+        Timers.end(index, "create tree", "retrieve_wiki_data_post_perturb")
+
+        # new: introducing extraneous wiki passage post retrieval from retrieval
+        Timers.start(index, "create tree", "construct_retrieved_evidence")
+        closest_match = self.construct_retrieved_evidence(index, wiki_data, perturbation)
+        Timers.end(index, "create tree", "construct_retrieved_evidence")
+
+        Timers.start(index, "create tree", "search_entities_2")
         rag_entities = self.rag.search_entities_2(prompt=perturbation)
+        Timers.end(index, "create tree", "search_entities_2")
+
+        Timers.start(index, "create tree", "search_entities_NER")
         ner_entities = self.rag.search_entities_NER(perturbation)
-        
-        return SemanticNode(
-            perturbation,
-            sem_sim,
-            root_sim,
-            lower_thresh,
-            self.embed_model.encode(perturbation),
-            closest_match,
-            rag_entities,
-            ner_entities,
-            parent=parent_node,
-            fk_score=fk_score,
-            dc_score=dc_score,
-            complexity_score=complexity_score
-        )  
+        Timers.end(index, "create tree", "search_entities_NER")
+
+        return (
+            SemanticNode(
+                perturbation,
+                sem_sim,
+                root_sim,
+                lower_thresh,
+                self.embed_model.encode(perturbation),
+                closest_match,
+                rag_entities,
+                ner_entities,
+                wiki_title=[w["title"] for w in wiki_data],
+                parent=parent_node,
+                fk_score=fk_score,
+                dc_score=dc_score,
+                complexity_score=complexity_score,
+                is_duplicate=have_children,
+            ),
+            have_children,
+        )
 
     def make_thresholds(self, distribution, upper_bound, lower_bound, depth):
         if distribution == "linear":
@@ -291,16 +367,8 @@ class Tree(AbstractTree):
             num_nodes += 1
             response = self.base.sem_check(context, node.prompt)
             if response.__contains__(expected_answer):
-                print(
-                    node.root_similarity_score
-                    if type(node) is SemanticNode
-                    else 1
-                )
-                sum += (
-                    node.root_similarity_score
-                    if type(node) is SemanticNode
-                    else 1
-                )
+                print(node.root_similarity_score if type(node) is SemanticNode else 1)
+                sum += node.root_similarity_score if type(node) is SemanticNode else 1
             for child in node.children:
                 queue.append(child)
         end_time = time.time()
@@ -327,9 +395,7 @@ class Tree(AbstractTree):
 
             if node.rag_closest_match is not None:
                 base_rag_response = self.rag.answer_using_wiki_2(
-                    model_name,
-                    node.prompt,
-                    node.rag_closest_match
+                    model_name, node.prompt, node.rag_closest_match
                 )
             else:
                 base_rag_response = "No answer"
@@ -369,8 +435,7 @@ class Tree(AbstractTree):
 
         # Calculate accuracy and F1 score for the base model
         accuracy = (
-            true_positives
-            / (true_positives + false_positives + false_negatives)
+            true_positives / (true_positives + false_positives + false_negatives)
             if (true_positives + false_positives + false_negatives) > 0
             else 0
         )
@@ -380,11 +445,11 @@ class Tree(AbstractTree):
                 * (true_positives / (true_positives + false_positives))
                 * (true_positives / (true_positives + false_negatives))
                 / (
-                        (true_positives / (true_positives + false_positives))
-                        + (true_positives / (true_positives + false_negatives))
+                    (true_positives / (true_positives + false_positives))
+                    + (true_positives / (true_positives + false_negatives))
                 )
                 if (true_positives + false_positives) > 0
-                   and (true_positives + false_negatives) > 0
+                and (true_positives + false_negatives) > 0
                 else 0
             )
         except:
@@ -394,38 +459,24 @@ class Tree(AbstractTree):
         rag_accuracy = (
             rag_true_positives
             / (rag_true_positives + rag_false_positives + rag_false_negatives)
-            if (rag_true_positives + rag_false_positives + rag_false_negatives)
-               > 0
+            if (rag_true_positives + rag_false_positives + rag_false_negatives) > 0
             else 0
         )
         try:
             rag_f1_score = (
                 2
-                * (
-                        rag_true_positives
-                        / (rag_true_positives + rag_false_positives)
-                )
-                * (
-                        rag_true_positives
-                        / (rag_true_positives + rag_false_negatives)
-                )
+                * (rag_true_positives / (rag_true_positives + rag_false_positives))
+                * (rag_true_positives / (rag_true_positives + rag_false_negatives))
                 / (
-                        (
-                                rag_true_positives
-                                / (rag_true_positives + rag_false_positives)
-                        )
-                        + (
-                                rag_true_positives
-                                / (rag_true_positives + rag_false_negatives)
-                        )
+                    (rag_true_positives / (rag_true_positives + rag_false_positives))
+                    + (rag_true_positives / (rag_true_positives + rag_false_negatives))
                 )
                 if (rag_true_positives + rag_false_positives) > 0
-                   and (rag_true_positives + rag_false_negatives) > 0
+                and (rag_true_positives + rag_false_negatives) > 0
                 else 0
             )
         except:
             rag_f1_score = 0
-
 
         end_time = time.time()
         self.time_check[model_name] = end_time - start_time
@@ -455,8 +506,7 @@ class Tree(AbstractTree):
         false_negatives = metrics["false_neg"]
 
         accuracy = (
-            true_positives
-            / (true_positives + false_positives + false_negatives)
+            true_positives / (true_positives + false_positives + false_negatives)
             if (true_positives + false_positives + false_negatives) > 0
             else 0
         )
@@ -476,10 +526,8 @@ class Tree(AbstractTree):
         base_rag_response = "No answer"
         if node.rag_closest_match is not None:
             base_rag_response = self.rag.answer_using_wiki_2(
-                    model_name,
-                    node.prompt,
-                    node.rag_closest_match
-                )
+                model_name, node.prompt, node.rag_closest_match
+            )
         node.answers[model_name] = {}
         node.answers[model_name]["base"] = response
         node.answers[model_name]["base_rag"] = base_rag_response
@@ -538,7 +586,7 @@ class Tree(AbstractTree):
 
         return node.answers[model_name], values
 
-    def run_check_pop_qa_batched(self, model_name, batch_size=5):
+    def run_check_pop_qa_batched(self, index, model_name, batch_size=5):
         start_time = time.time()
         # Populate the queue with all nodes in the tree
         queue = deque([self.root])
@@ -561,19 +609,20 @@ class Tree(AbstractTree):
         metrics = {
             "base": {"true_pos": 0, "false_pos": 0, "false_neg": 0},
             "base_rag": {"true_pos": 0, "false_pos": 0, "false_neg": 0},
-        }       
+        }
         while queue:
-            batch = [
-                queue.popleft() for _ in range(min(batch_size, len(queue)))
-            ]
+            batch = [queue.popleft() for _ in range(min(batch_size, len(queue)))]
             for node in batch:
                 # Process the node sequentially
+
+                Timers.start(index, model_name, "sem_check")
                 answers, node_metrics = self.process_node(node, model_name)
-                
+                Timers.end(index, model_name, "sem_check")
+
                 # Append results
                 responses.append(answers["base"])
                 base_rag_responses.append(answers["base_rag"])
-                
+
                 # Update the metrics
                 for metric in metrics:
                     metrics[metric]["true_pos"] += node_metrics[metric]["true_pos"]
@@ -604,9 +653,7 @@ class Tree(AbstractTree):
         return answer
 
     def add_bleu_and_rouge(self, model_name):
-        scorer = rouge_scorer.RougeScorer(
-            ["rouge1", "rougeL"], use_stemmer=True
-        )
+        scorer = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
         base_references = [
             [word for word in answer.split()]
             for answer in json.loads(self.possible_answers)
@@ -620,9 +667,7 @@ class Tree(AbstractTree):
             cands = [response.split() for response in predictions]
             refs = [base_references for _ in cands]
             if len(cands) != len(refs):
-                raise ValueError(
-                    "The number of responses and references must match."
-                )
+                raise ValueError("The number of responses and references must match.")
             bleu = corpus_bleu(refs, cands)
 
             rouge_scores = {"rouge1": [], "rougeL": []}
@@ -680,7 +725,7 @@ class Tree(AbstractTree):
             for child in node.children:
                 queue.append(child)
         return None
-            
+
     def save_tree(self, file_path):
         node = {
             "root": self.root,
@@ -693,12 +738,12 @@ class Tree(AbstractTree):
             "root_prompt": self.root_prompt,
             "possible_answers": self.possible_answers,
             "rag_entities": self.rag_entities,
-            "ner_entities":self.ner_entities,
-            "rag_closest_match": self.root.rag_closest_match
+            "ner_entities": self.ner_entities,
+            "rag_closest_match": self.root.rag_closest_match,
         }
         dir = os.path.dirname(file_path)
         if not os.path.exists(dir):
-            os.makedirs(dir) 
+            os.makedirs(dir)
         with open(file_path, "wb") as file:
             pickle.dump(node, file)
 
@@ -708,12 +753,12 @@ class Tree(AbstractTree):
         with open(file_path, "rb") as file:
             prev_state = pickle.load(file)
         root_prompt = prev_state["root_prompt"]
-        return Tree(root_prompt,
-                    eval=eval,
-                    sem_perturber=kargs.get("sem_perturber", None),
-                    syn_perturber=kargs.get("syn_perturber", None),
-                    generator=kargs.get("generator", None),
-                    embedder=kargs.get("embedder", None),
-                    prev_state=prev_state,
-                    )
-
+        return Tree(
+            root_prompt,
+            eval=eval,
+            sem_perturber=kargs.get("sem_perturber", None),
+            syn_perturber=kargs.get("syn_perturber", None),
+            generator=kargs.get("generator", None),
+            embedder=kargs.get("embedder", None),
+            prev_state=prev_state,
+        )
