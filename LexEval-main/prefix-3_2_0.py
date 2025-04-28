@@ -1,5 +1,4 @@
 from tree.tree import Tree
-from adapters.SemanticAdapter import SemanticAdapter
 from adapters.SemanticPerturb import (
     SemanticPerturber,
     ParaphrasePerturber,
@@ -8,7 +7,7 @@ from adapters.SemanticPerturb import (
 )
 from adapters.SyntacticPerturb import SyntacticPerturber
 from adapters.OAI_Embeddings import EmbedAdapter, RobertaEmbedder
-from model.engine import LLMAdapter, Gemma3Adapter
+from model.engine import LLMAdapter
 from utils.timer import Timers
 from wiki_cache.db import engine, Session
 import wiki_cache.models as models
@@ -16,6 +15,7 @@ from wiki_cache.cache import clear_cache_db
 
 import pandas as pd
 import torch
+from sklearn.model_selection import train_test_split
 
 import os
 import logging
@@ -25,21 +25,32 @@ import gc
 import sys
 import re
 import traceback
+import argparse
 
+size = 310
 SEED = 42
 RETRY_COUNT = 0
 ERROR_THRESHOLD = 500
 DLQ = []  # Dead Letter Queue
 DF_LOCATION = "/vol/bitbucket/lst20/lex-eval_dataset/PopQA/test.csv"
 SHUFFLED_FILE = "/vol/bitbucket/lst20/lex-eval_dataset/PopQA/shuffled.csv"
+STRATEGY_PATH_DICT = {
+    "prefix":"prefix",
+    "paraphrase":"para",
+    "paraphrase_then_prefix":"para-prefix",
+    }
 
+# ####################### DEFAULT #######################
 # prefix, paraphrase, paraphrase_then_prefix
-STRATEGY = "paraphrase"
-# "para-prefix" prefix para
-statrgy_path = "para"
+strategy = "prefix"
+# google/gemma-3-12b-it mistral.mistral-7b-instruct-v0:2
+gen_modelId = "google/gemma-3-12b-it"
+eval_only = False
+# #######################################################
+statrgy_path = STRATEGY_PATH_DICT[strategy]
 intermediatory_tree_dir = f"/vol/bitbucket/lst20/treenodes/{statrgy_path}/gemma3-12b_perturb/3_2_0/tree"
-checked_tree_dir = f"/vol/bitbucket/lst20/treenodes/{statrgy_path}/gemma3-12b_perturb/3_2_0/gemma-3-12b/complete"
-TIMER_PATH = f"/vol/bitbucket/lst20/timers/gemma3-12b-with-caching-{statrgy_path}.pkl"
+checked_tree_dir = f"/vol/bitbucket/lst20/treenodes/{statrgy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete"
+timer_path = f"/vol/bitbucket/lst20/timers/gemma3-12b-with-caching-{statrgy_path}.pkl"
 
 
 def clear_cache():
@@ -74,25 +85,25 @@ def write_to_dlq(filename, text):
         dlq_file.write(f"{text}:\n")
 
 
-def get_answer(index, og_index, generator, modelId, embedder):
+def get_answer(index, og_index, device, generator, modelId, embedder):
     tree_file_path = f"{intermediatory_tree_dir}/{og_index}.pkl"
     checked_tree_file_path = f"{checked_tree_dir}/{og_index}_checked.pkl"
     max_retries = RETRY_COUNT
     for retry_count in range(max_retries + 1):
         logging.info(f"Evaluating tree of dataset row: {index}, attempt: {retry_count}")
         try:
-            # Load tree in evaluation mode using the generator
-            test_tree = Tree.load_tree(
-                tree_file_path, eval=True, generator=generator, embedder=embedder
-            )
-            test_tree.run_check_pop_qa_batched(index=index, model_name=modelId)
-            # test_tree.add_bleu_and_rouge(model_name=modelId)
-            test_tree.save_tree(checked_tree_file_path)
-            test_tree.print_tree()
+            if not os.path.exists(checked_tree_file_path):
+                test_tree = Tree.load_tree(
+                    device, tree_file_path, eval=True, generator=generator, embedder=embedder
+                )
+                test_tree.run_check_pop_qa_batched(index=index, model_name=modelId)
+                # test_tree.add_bleu_and_rouge(model_name=modelId)
+                test_tree.save_tree(checked_tree_file_path)
+                test_tree.print_tree()
 
-            # Explicitly remove the tree if it's no longer needed
-            del test_tree
-            break  # Success: exit the retry loop
+                # Explicitly remove the tree if it's no longer needed
+                del test_tree
+                break  # Success: exit the retry loop
 
         except ValueError as err:
             if "Make sure you have enough GPU RAM" in str(err):
@@ -166,7 +177,7 @@ def get_question_tree(
                 raise err
 
 
-def read_dataset(seed, columns=None):
+def read_dataset(size, columns=None):
     if not os.path.exists(SHUFFLED_FILE):
         if not os.path.exists(DF_LOCATION):
             # Ensure the directory exists
@@ -176,11 +187,11 @@ def read_dataset(seed, columns=None):
 
             # Read original dataset
             df = pd.read_csv("hf://datasets/akariasai/PopQA/test.tsv", sep="\t")
-            print("read from hf source")
+            logging.info("read from hf source")
         else:
             # Load already saved dataset
             df = pd.read_csv(DF_LOCATION)
-            print("read from local source")
+            logging.info("read from local source")
 
         # Ensure the directory exists
         dir = os.path.dirname(SHUFFLED_FILE)
@@ -191,11 +202,21 @@ def read_dataset(seed, columns=None):
         df["original_index"] = df.index
 
         # Shuffle dataset with original index column preserved
-        df_shuffled = df.sample(frac=1, random_state=seed)
-
+        # df_shuffled = df.sample(frac=1, random_state=seed)
+        size_ratio = round(size / len(df), 2) 
+        # Split the data to get a subset with the same distribution of classes
+        _, df_shuffled, _, _ = train_test_split(
+            df,
+            df["prop"],
+            test_size=size_ratio,
+            shuffle=True,
+            random_state=SEED,
+            stratify=df["prop"]
+        )
         # Save shuffled dataset
         df_shuffled.to_csv(SHUFFLED_FILE, index=False)
-        print(f"df_shuffled saved to {SHUFFLED_FILE}")
+        
+        logging.info(f"df_shuffled saved to {SHUFFLED_FILE}")
 
     # Load already saved shuffled dataset
     if columns is None:
@@ -210,22 +231,11 @@ def select_perturber(type: str, params: dict) -> SemanticPerturber:
     """
     Factory method to select and instantiate a SemanticPerturber.
     """
+    if eval_only:
+        return None
     def get_paraphraser(paraphrase_modelId: str, embedder: EmbedAdapter) -> ParaphrasePerturber:
-        model: LLMAdapter = None
-        if "gemma-3" in paraphrase_modelId.lower():
-            from model.engine import Gemma3Adapter
-            model = Gemma3Adapter(paraphrase_modelId)
-        elif "gemma" in paraphrase_modelId.lower():
-            from model.engine import GemmaAdapter
-            model = GemmaAdapter(paraphrase_modelId)
-        elif "mistralai" in paraphrase_modelId.lower():
-            from model.engine import MistralInstructAdapter
-            model = MistralInstructAdapter(paraphrase_modelId)
-        elif "mistral.mistral-7b-instruct-v0:2" in paraphrase_modelId.lower():
-            from model.engine import MistralInstructAwsAdapter
-            model = MistralInstructAwsAdapter(paraphrase_modelId)
-        else:
-            raise NotImplementedError(f"No adapter implemented for: {paraphrase_modelId}")
+        from model.engine import Gemma3Adapter
+        model = Gemma3Adapter(paraphrase_modelId)
         return ParaphrasePerturber(model, embedder)
 
     type = type.lower()
@@ -243,13 +253,64 @@ def select_perturber(type: str, params: dict) -> SemanticPerturber:
     else:
         raise ValueError(f"Unknown perturber type: {type}")
 
-if __name__ == "__main__":
-    # Check if the correct number of arguments is passed
-    if len(sys.argv) < 3:
-        print("wrong params!", sys.argv)
-        sys.exit(1)
-    formatted_time = datetime.fromtimestamp(time.time()).strftime("%m-%d-%H:%M:%S")
-    filename = f"/vol/bitbucket/lst20/logs/{formatted_time}_logs.log"
+
+def get_generator(modelId: str) -> ParaphrasePerturber:
+    model: LLMAdapter = None
+    if "gemma-3" in modelId.lower():
+        from model.engine import Gemma3Adapter
+        model = Gemma3Adapter(modelId)
+    elif "gemma" in modelId.lower():
+        from model.engine import GemmaAdapter
+        model = GemmaAdapter(modelId)
+    elif "mistralai" in modelId.lower():
+        from model.engine import MistralInstructAdapter
+        model = MistralInstructAdapter(modelId)
+    elif "mistral.mistral-7b-instruct-v0:2" in modelId.lower():
+        from model.engine import MistralInstructAwsAdapter
+        model = MistralInstructAwsAdapter(modelId)
+    else:
+        raise NotImplementedError(f"No adapter implemented for: {modelId}")
+    return model
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Script with strategy and model flags, plus 2 required integers.")
+    
+    # Optional named flags
+    parser.add_argument("--strategy", type=str, default=strategy, help="Strategy to use (e.g., prefix, para-prefix)")
+    parser.add_argument("--gen_modelId", type=str, default=gen_modelId, help="Generation model ID (e.g., google/gemma-3-12b-it)")
+    parser.add_argument("--eval_only", action="store_true", help="Flag to run in evaluation-only mode.")
+
+    # Compulsory positional integers
+    parser.add_argument("start_idx", type=int, help="starting index for processing of dataset.")
+    parser.add_argument("end_idx", type=int, help="ending index for processing of dataset.")
+    
+    return parser.parse_args()
+
+
+def update_params():
+    global statrgy_path, intermediatory_tree_dir, checked_tree_dir, timer_path
+    statrgy_path = STRATEGY_PATH_DICT[strategy]
+    intermediatory_tree_dir = f"/vol/bitbucket/lst20/treenodes/{statrgy_path}/gemma3-12b_perturb/3_2_0/tree"
+    checked_tree_dir = f"/vol/bitbucket/lst20/treenodes/{statrgy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete"
+    timer_path = f"/vol/bitbucket/lst20/timers/gemma3-12b-with-caching-{statrgy_path}.pkl"
+
+
+def main():
+    # ###################### parse input ######################
+    global strategy, gen_modelId, eval_only
+    args = parse_args()
+    # prefix, paraphrase, paraphrase_then_prefix
+    strategy = args.strategy
+    gen_modelId = args.gen_modelId
+    eval_only = args.eval_only
+    start_idx = args.start_idx
+    end_idx = args.end_idx
+    update_params()
+    # ########################################################
+     
+    formatted_time = datetime.fromtimestamp(time.time()).strftime("%m-%d-%H:%M")
+    filename = f"/vol/bitbucket/lst20/logs/{formatted_time}_{start_idx}_to_{end_idx}_{statrgy_path}.log"
     configure_logging(filename)
 
     # create dlq file
@@ -259,10 +320,6 @@ if __name__ == "__main__":
         os.makedirs(dlq_dir)
     with open(dlq_path, "a") as dlq_file:
         dlq_file.write("DLQ:\n")
-
-    start_idx = int(sys.argv[1])
-    end_idx = int(sys.argv[2])
-    current_index = start_idx
     
     Timers.reset()
 
@@ -276,86 +333,87 @@ if __name__ == "__main__":
     models.Base.metadata.drop_all(engine)
     models.Base.metadata.create_all(bind=engine)
 
+    logging.info(f"intermediatory_tree_dir: {intermediatory_tree_dir}")
+    logging.info(f"answer generator: {gen_modelId}")
     start_time = time.time()
-    logging.info(
-        "Start time: %s", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_time))
-    )
-    ##################### factory this ###########################
-    tree_size = (3, 2, 0)
-    syntactic_adapter = SyntacticPerturber()
-    embedder = RobertaEmbedder()
-    ##############################################################
-    model_provisioned_time = time.time()
-    model_start_duration = model_provisioned_time - start_time
-    logging.info(f"model ready in: {model_start_duration:.3g} s")
-    logging.info(f"intermediatory_tree_dir: {intermediatory_tree_dir} s")
+        
     df = read_dataset(
-        SEED, columns=["question", "possible_answers", "s_uri", "original_index"]
+        size, columns=["question", "possible_answers", "s_uri", "original_index"]
     )
-    # generate questions
-    params = {
-        "modelId": "google/gemma-3-12b-it",
-        "embedder": embedder,
-        "tree_size": tree_size
-    }
-    with select_perturber(STRATEGY, params) as semantic_adapter:
-        for index, row in df.iloc[start_idx : end_idx + 1].iterrows():
-            try:
-                with torch.no_grad():
-                    get_question_tree(
-                        index,
-                        row,
-                        semantic_adapter,
-                        syntactic_adapter,
-                        None,
-                        embedder,
-                        tree_size,
-                    )
-            except Exception or RuntimeError as err:
-                if error_questions < ERROR_THRESHOLD:
-                    error_questions += 1
-                    # Get the full stack trace as a string
-                    stack_trace = traceback.format_exc()
-                    logging.info(
-                        f"Question of index: {index} cannot be processed, adding to DLQ. "
-                        f"{ERROR_THRESHOLD - error_questions} tries left. error: {err}\nStack trace:\n{stack_trace}"
-                    )
-                    error_entry = {"num": index, "err": str(err), "trace": stack_trace}
-                    DLQ.append(error_entry)
-                    write_to_dlq(dlq_path, str(error_entry))
-                else:
-                    logging.error(
-                        f"Error threshold reached. Question after index {index} will not be processed."
-                    )
-                    DLQ.append({"num": index, "err": err})
-                    print("DLQ: ", DLQ)
-                    write_to_dlq(dlq_path, str({"num": index, "err": err}))
-                    raise err
-            # Clear cache after processing sample
-            clear_cache_db()
+    
+    if not eval_only:
+        logging.info(
+            "Start time: %s", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_time))
+        )
+        tree_size = (3, 2, 0)
+        syntactic_adapter = SyntacticPerturber()
+        embedder = RobertaEmbedder()
+        model_provisioned_time = time.time()
+        model_start_duration = model_provisioned_time - start_time
+        logging.info(f"model ready in: {model_start_duration:.3g} s")
+        
+        # generate questions
+        params = {
+            "modelId": "google/gemma-3-12b-it",
+            "embedder": embedder,
+            "tree_size": tree_size
+        }
+        with select_perturber(strategy, params) as semantic_adapter:
+            for index, row in df.iloc[start_idx : end_idx + 1].iterrows():
+                try:
+                    with torch.no_grad():
+                        get_question_tree(
+                            index,
+                            row,
+                            semantic_adapter,
+                            syntactic_adapter,
+                            None,
+                            embedder,
+                            tree_size,
+                        )
+                except Exception or RuntimeError as err:
+                    if error_questions < ERROR_THRESHOLD:
+                        error_questions += 1
+                        # Get the full stack trace as a string
+                        stack_trace = traceback.format_exc()
+                        logging.info(
+                            f"Question of index: {index} cannot be processed, adding to DLQ. "
+                            f"{ERROR_THRESHOLD - error_questions} tries left. error: {err}\nStack trace:\n{stack_trace}"
+                        )
+                        error_entry = {"num": index, "err": str(err), "trace": stack_trace}
+                        DLQ.append(error_entry)
+                        write_to_dlq(dlq_path, str(error_entry))
+                    else:
+                        logging.error(
+                            f"Error threshold reached. Question after index {index} will not be processed."
+                        )
+                        DLQ.append({"num": index, "err": err})
+                        logging.info("DLQ: ", DLQ)
+                        write_to_dlq(dlq_path, str({"num": index, "err": err}))
+                        raise err
+                # Clear cache after processing sample
+                clear_cache_db()
 
-    # post perturb cleanup
-    Session.remove()
-    engine.dispose()
-    clear_cache()
+        # post perturb cleanup
+        Session.remove()
+        engine.dispose()
+        clear_cache()
 
-    free_mem, total_mem = torch.cuda.mem_get_info()
-    logging.info(f"after clearing cache, {free_mem / 1024**2:.2f} MB/{total_mem / 1024**2:.2f} MB memory available")
-    logging.info(f"Allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
-    logging.info(f"Cached:    {torch.cuda.memory_reserved() / 1024**2:.2f} MB")
+        free_mem, total_mem = torch.cuda.mem_get_info()
+        logging.info(f"after clearing cache, {free_mem / 1024**2:.2f} MB/{total_mem / 1024**2:.2f} MB memory available")
+        logging.info(f"Allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+        logging.info(f"Cached:    {torch.cuda.memory_reserved() / 1024**2:.2f} MB")
 
     logging.info("********* start eval tree *********")
-    # #############################################################
-    gen_modelId = "google/gemma-3-12b-it"
-    generator_model = Gemma3Adapter(gen_modelId)
-    generator = generator_model
+    generator = get_generator(gen_modelId)
     embedder = RobertaEmbedder()
-    # ############################################################
+    device=generator.device 
+
     for index, row in df.iloc[start_idx : end_idx + 1].iterrows():
         try:
             # generate questions
             og_index = row["original_index"]
-            get_answer(index, og_index, generator, gen_modelId, embedder)
+            get_answer(index, og_index, device, generator, gen_modelId, embedder)
         except Exception or RuntimeError as err:
             if error_questions < ERROR_THRESHOLD:
                 error_questions += 1
@@ -373,17 +431,18 @@ if __name__ == "__main__":
                     f"Error threshold reached. Question after index {index} will not be processed."
                 )
                 DLQ.append({"num": index, "err": err})
-                print("DLQ: ", DLQ)
+                logging.info("DLQ: ", DLQ)
                 write_to_dlq(dlq_path, str({"num": index, "err": err}))
                 raise err
 
     Timers.print_report()
-    Timers.save(TIMER_PATH)
+    Timers.save(timer_path)
 
     end_time = time.time()
     time_taken = time.strftime("%H:%M:%S", time.gmtime(end_time - start_time))
     logging.info(
         f"done! time to evaluate {end_idx - start_idx + 1} trees: {time_taken}"
     )
-    print(f"done! time to evaluate {end_idx - start_idx + 1} trees: {time_taken}")
-    print("DLQ: ", DLQ)
+
+if __name__ == "__main__":
+    main()
