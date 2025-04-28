@@ -69,6 +69,7 @@ class GemmaAdapter(LLMAdapter):
                                                device_map='auto',
                                                quantization_config=self.quantization_options,
                                                **kwargs)
+        self.device = self.model.device
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
 
         self.pipeline = pipeline("text-generation",
@@ -138,14 +139,14 @@ class Gemma3Adapter(LLMAdapter):
             device_map="auto",
             quantization_config=self.quantization_options
         )
+        self.device = self.model.device
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         
         # Ensure left‑padding so that the attention mask aligns with Flash‑Attention
         # blocks; we also guarantee a pad token exists.
         self.tokenizer.padding_side = "left"
-        if self.tokenizer.pad_token_id is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.pad_token = self.tokenizer.eos_token
 
     def cleanup(self):
             self.quantization_options = None
@@ -194,10 +195,18 @@ class Gemma3Adapter(LLMAdapter):
                     num_beams=2,
                     do_sample=False,
                     pad_token_id=self.tokenizer.eos_token_id,
-                )   
-            inputs = self.tokenizer.apply_chat_template(
-                prompt, add_generation_prompt=True, tokenize=True,
-                return_dict=True, return_tensors="pt"
+                )
+            formatted_prompt = self.tokenizer.apply_chat_template(
+                prompt,
+                tokenize=False,
+                add_generation_prompt=True,
+                add_special_tokens=False
+            )
+            inputs = self.tokenizer(
+                formatted_prompt,
+                padding='longest',
+                pad_to_multiple_of=8,
+                return_tensors='pt',
             ).to(self.model.device)
             input_len = inputs["input_ids"].shape[-1]
             with torch.inference_mode():
@@ -224,6 +233,7 @@ class Llama32Adapter(LLMAdapter):
                                                       quantization_config=self.quantization_options,
                                                         device_map='auto'
         )
+        self.device = self.model.device
         
         # setup tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -290,6 +300,7 @@ class MistralInstructAdapter(LLMAdapter):
             quantization_config=self.quantization_options,
             device_map='auto'
         )
+        self.device = self.model.device
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.padding_side = "left"
@@ -370,6 +381,7 @@ class MistralInstructAwsAdapter(LLMAdapter):
         self.output_tokens = 0
         self.requests = 0
         self.model_path = model_path
+        self.device = 'cpu'
         boto_session = boto3.session.Session()
         self.MAX_RETRIES = 10
         self.BASE_DELAY = 15
