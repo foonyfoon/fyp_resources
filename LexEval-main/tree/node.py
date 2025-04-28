@@ -17,6 +17,17 @@ class Node:
         child.id = f"{self.id}.{len(self.children)}"
         self.children.append(child)
         child.parent = self
+        
+    def move_to_cpu(self):
+        self.embedding = self.embedding.cpu()
+        for child in self.children:
+            child.move_to_cpu()
+            
+    def move_to_device(self, device):
+        self.embedding = self.embedding.to(device)
+        for child in self.children:
+            child.move_to_cpu()
+            
 
 class RootNode(Node):
     def __init__(self,

@@ -10,7 +10,7 @@ import spacy
 import torch
 import torch.nn.functional as F
 
-from adapters.SemanticAdapter import SemanticAdapter
+from adapters.SemanticAdapter import SemanticAdapter 
 from adapters.OAI_Embeddings import EmbedAdapter
 from utils.wiki_helper import WikiHelper
 from similarity.cosine_similarity import similarity, similarities

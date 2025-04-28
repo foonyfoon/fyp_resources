@@ -95,6 +95,9 @@ class ReadTree(AbstractTree):
         self.rag_closest_match = (
             [] if prev_state is None else prev_state["rag_closest_match"]
         )
+        self.gt_passage = (
+            [] if prev_state is None else prev_state["gt_passage"]
+        )
 
     @staticmethod
     def load_read_tree(file_path: str) -> "ReadTree":
@@ -147,17 +150,20 @@ class Tree(AbstractTree):
         if is_eval and prev_state is not None:
             self.rag_entities = prev_state.get("rag_entities")
             self.ner_entities = prev_state.get("ner_entities")
+            self.gt_passage = prev_state.get("gt_passage")
             self.root.rag_closest_match = prev_state.get("rag_closest_match")
+            self.gt_passage = prev_state.get("gt_passage")
             self.root.wiki_title = prev_state.get("wiki_title")
         elif not is_eval:
             # Otherwise, run retriever pipeline
             wiki_data = self.rag.retrieve_wiki_data_2(root_prompt)
-            closest_match = self.rag.find_gt_passage(s_uri_code, root_prompt)
+            self.gt_passage = self.rag.find_gt_passage(s_uri_code, root_prompt)
+            closest_match = self.construct_retrieved_evidence(0, wiki_data, root_prompt)
             self.rag_entities = self.rag.search_entities_2(prompt=root_prompt)
             self.ner_entities = self.rag.search_entities_NER(prompt=root_prompt)
             self.root.rag_closest_match = closest_match
             self.root.wiki_title = [w["title"] for w in wiki_data]
-
+            
         self.thresholds = [] if prev_state is None else prev_state["thresholds"]
         self.prompt_list = (
             [root_prompt] if prev_state is None else prev_state["prompt_list"]
@@ -229,7 +235,7 @@ class Tree(AbstractTree):
         self, index, wiki_data, perturbation, k_docs=4, correct_docs=1
     ):
         # list of tuple of {title: context} dict and sim_score of doc with prompt
-        ground_truth_docs = self.root.rag_closest_match
+        ground_truth_docs = self.gt_passage
         # Use however many ground truth docs are available.
         extraneous_needed = k_docs - correct_docs
         # filter out wiki data in ground_truth_docs from wiki_data before doing topK
@@ -727,6 +733,7 @@ class Tree(AbstractTree):
         return None
 
     def save_tree(self, file_path):
+        self.root.move_to_cpu()
         node = {
             "root": self.root,
             "thresholds": self.thresholds,
@@ -740,6 +747,7 @@ class Tree(AbstractTree):
             "rag_entities": self.rag_entities,
             "ner_entities": self.ner_entities,
             "rag_closest_match": self.root.rag_closest_match,
+            "gt_passage": self.gt_passage,
         }
         dir = os.path.dirname(file_path)
         if not os.path.exists(dir):
@@ -748,12 +756,12 @@ class Tree(AbstractTree):
             pickle.dump(node, file)
 
     @staticmethod
-    def load_tree(file_path, eval=False, **kargs):
+    def load_tree(device, file_path, eval=False, **kargs):
         prev_state = {}
         with open(file_path, "rb") as file:
             prev_state = pickle.load(file)
         root_prompt = prev_state["root_prompt"]
-        return Tree(
+        tree = Tree(
             root_prompt,
             eval=eval,
             sem_perturber=kargs.get("sem_perturber", None),
@@ -762,3 +770,5 @@ class Tree(AbstractTree):
             embedder=kargs.get("embedder", None),
             prev_state=prev_state,
         )
+        tree.root.move_to_device(device)
+        return tree
