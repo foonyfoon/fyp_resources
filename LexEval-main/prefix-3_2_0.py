@@ -27,7 +27,7 @@ import re
 import traceback
 import argparse
 
-size = 310
+EVAL_SIZE = 310
 SEED = 42
 RETRY_COUNT = 0
 ERROR_THRESHOLD = 500
@@ -39,7 +39,7 @@ STRATEGY_PATH_DICT = {
     "paraphrase":"para",
     "paraphrase_then_prefix":"para-prefix",
     }
-
+TREE_SIZE = (3, 2, 0)
 # ####################### DEFAULT #######################
 # prefix, paraphrase, paraphrase_then_prefix
 strategy = "prefix"
@@ -338,14 +338,13 @@ def main():
     start_time = time.time()
         
     df = read_dataset(
-        size, columns=["question", "possible_answers", "s_uri", "original_index"]
+        EVAL_SIZE, columns=["question", "possible_answers", "s_uri", "original_index"]
     )
     
     if not eval_only:
         logging.info(
             "Start time: %s", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_time))
         )
-        tree_size = (3, 2, 0)
         syntactic_adapter = SyntacticPerturber()
         embedder = RobertaEmbedder()
         model_provisioned_time = time.time()
@@ -356,7 +355,7 @@ def main():
         params = {
             "modelId": "google/gemma-3-12b-it",
             "embedder": embedder,
-            "tree_size": tree_size
+            "tree_size": TREE_SIZE
         }
         with select_perturber(strategy, params) as semantic_adapter:
             for index, row in df.iloc[start_idx : end_idx + 1].iterrows():
@@ -369,7 +368,7 @@ def main():
                             syntactic_adapter,
                             None,
                             embedder,
-                            tree_size,
+                            TREE_SIZE,
                         )
                 except Exception or RuntimeError as err:
                     if error_questions < ERROR_THRESHOLD:
