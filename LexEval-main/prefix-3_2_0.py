@@ -26,20 +26,8 @@ import sys
 import re
 import traceback
 import argparse
+import utils.constants as constants
 
-EVAL_SIZE = 310
-SEED = 42
-RETRY_COUNT = 0
-ERROR_THRESHOLD = 500
-DLQ = []  # Dead Letter Queue
-DF_LOCATION = "/vol/bitbucket/lst20/lex-eval_dataset/PopQA/test.csv"
-SHUFFLED_FILE = "/vol/bitbucket/lst20/lex-eval_dataset/PopQA/shuffled.csv"
-STRATEGY_PATH_DICT = {
-    "prefix":"prefix",
-    "paraphrase":"para",
-    "paraphrase_then_prefix":"para-prefix",
-    }
-TREE_SIZE = (3, 2, 0)
 # ####################### DEFAULT #######################
 # prefix, paraphrase, paraphrase_then_prefix
 strategy = "prefix"
@@ -47,10 +35,11 @@ strategy = "prefix"
 gen_modelId = "google/gemma-3-12b-it"
 eval_only = False
 # #######################################################
-statrgy_path = STRATEGY_PATH_DICT[strategy]
+statrgy_path = constants.STRATEGY_PATH_DICT[strategy]
 intermediatory_tree_dir = f"/vol/bitbucket/lst20/treenodes/{statrgy_path}/gemma3-12b_perturb/3_2_0/tree"
 checked_tree_dir = f"/vol/bitbucket/lst20/treenodes/{statrgy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete"
 timer_path = f"/vol/bitbucket/lst20/timers/gemma3-12b-with-caching-{statrgy_path}.pkl"
+DLQ = []  # Dead Letter Queue
 
 
 def clear_cache():
@@ -88,7 +77,7 @@ def write_to_dlq(filename, text):
 def get_answer(index, og_index, device, generator, modelId, embedder):
     tree_file_path = f"{intermediatory_tree_dir}/{og_index}.pkl"
     checked_tree_file_path = f"{checked_tree_dir}/{og_index}_checked.pkl"
-    max_retries = RETRY_COUNT
+    max_retries = constants.RETRY_COUNT
     for retry_count in range(max_retries + 1):
         logging.info(f"Evaluating tree of dataset row: {index}, attempt: {retry_count}")
         try:
@@ -125,7 +114,7 @@ def get_answer(index, og_index, device, generator, modelId, embedder):
 def get_question_tree(
     index, row, semantic_adapter, syntactic_adapter, ner_model, embedder, tree_size
 ):
-    max_retries = RETRY_COUNT
+    max_retries = constants.RETRY_COUNT
     for retry_count in range(max_retries + 1):
         try:
             logging.info(
@@ -178,10 +167,10 @@ def get_question_tree(
 
 
 def read_dataset(size, columns=None):
-    if not os.path.exists(SHUFFLED_FILE):
-        if not os.path.exists(DF_LOCATION):
+    if not os.path.exists(constants.SHUFFLED_FILE):
+        if not os.path.exists(constants.DF_LOCATION):
             # Ensure the directory exists
-            dir = os.path.dirname(DF_LOCATION)
+            dir = os.path.dirname(constants.DF_LOCATION)
             if not os.path.exists(dir):
                 os.makedirs(dir)
 
@@ -190,11 +179,11 @@ def read_dataset(size, columns=None):
             logging.info("read from hf source")
         else:
             # Load already saved dataset
-            df = pd.read_csv(DF_LOCATION)
+            df = pd.read_csv(constants.DF_LOCATION)
             logging.info("read from local source")
 
         # Ensure the directory exists
-        dir = os.path.dirname(SHUFFLED_FILE)
+        dir = os.path.dirname(constants.SHUFFLED_FILE)
         if not os.path.exists(dir):
             os.makedirs(dir)
 
@@ -210,19 +199,19 @@ def read_dataset(size, columns=None):
             df["prop"],
             test_size=size_ratio,
             shuffle=True,
-            random_state=SEED,
+            random_state=constants.SEED,
             stratify=df["prop"]
         )
         # Save shuffled dataset
-        df_shuffled.to_csv(SHUFFLED_FILE, index=False)
+        df_shuffled.to_csv(constants.SHUFFLED_FILE, index=False)
         
-        logging.info(f"df_shuffled saved to {SHUFFLED_FILE}")
+        logging.info(f"df_shuffled saved to {constants.SHUFFLED_FILE}")
 
     # Load already saved shuffled dataset
     if columns is None:
-        df_shuffled = pd.read_csv(SHUFFLED_FILE)
+        df_shuffled = pd.read_csv(constants.SHUFFLED_FILE)
     else:
-        df_shuffled = pd.read_csv(SHUFFLED_FILE, usecols=columns)
+        df_shuffled = pd.read_csv(constants.SHUFFLED_FILE, usecols=columns)
 
     return df_shuffled
 
@@ -290,7 +279,7 @@ def parse_args():
 
 def update_params():
     global statrgy_path, intermediatory_tree_dir, checked_tree_dir, timer_path
-    statrgy_path = STRATEGY_PATH_DICT[strategy]
+    statrgy_path = constants.STRATEGY_PATH_DICT[strategy]
     intermediatory_tree_dir = f"/vol/bitbucket/lst20/treenodes/{statrgy_path}/gemma3-12b_perturb/3_2_0/tree"
     checked_tree_dir = f"/vol/bitbucket/lst20/treenodes/{statrgy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete"
     timer_path = f"/vol/bitbucket/lst20/timers/gemma3-12b-with-caching-{statrgy_path}.pkl"
@@ -338,7 +327,7 @@ def main():
     start_time = time.time()
         
     df = read_dataset(
-        EVAL_SIZE, columns=["question", "possible_answers", "s_uri", "original_index"]
+        constants.EVAL_SIZE, columns=["question", "possible_answers", "s_uri", "original_index"]
     )
     
     if not eval_only:
@@ -355,7 +344,7 @@ def main():
         params = {
             "modelId": "google/gemma-3-12b-it",
             "embedder": embedder,
-            "tree_size": TREE_SIZE
+            "tree_size": constants.TREE_SIZE
         }
         with select_perturber(strategy, params) as semantic_adapter:
             for index, row in df.iloc[start_idx : end_idx + 1].iterrows():
@@ -368,16 +357,16 @@ def main():
                             syntactic_adapter,
                             None,
                             embedder,
-                            TREE_SIZE,
+                            constants.TREE_SIZE,
                         )
                 except Exception or RuntimeError as err:
-                    if error_questions < ERROR_THRESHOLD:
+                    if error_questions < constants.ERROR_THRESHOLD:
                         error_questions += 1
                         # Get the full stack trace as a string
                         stack_trace = traceback.format_exc()
                         logging.info(
                             f"Question of index: {index} cannot be processed, adding to DLQ. "
-                            f"{ERROR_THRESHOLD - error_questions} tries left. error: {err}\nStack trace:\n{stack_trace}"
+                            f"{constants.ERROR_THRESHOLD - error_questions} tries left. error: {err}\nStack trace:\n{stack_trace}"
                         )
                         error_entry = {"num": index, "err": str(err), "trace": stack_trace}
                         DLQ.append(error_entry)
@@ -414,13 +403,13 @@ def main():
             og_index = row["original_index"]
             get_answer(index, og_index, device, generator, gen_modelId, embedder)
         except Exception or RuntimeError as err:
-            if error_questions < ERROR_THRESHOLD:
+            if error_questions < constants.ERROR_THRESHOLD:
                 error_questions += 1
                 # Get the full stack trace as a string
                 stack_trace = traceback.format_exc()
                 logging.info(
                     f"Question of index: {index} cannot be processed, adding to DLQ. "
-                    f"{ERROR_THRESHOLD - error_questions} tries left. error: {err}\nStack trace:\n{stack_trace}"
+                    f"{constants.ERROR_THRESHOLD - error_questions} tries left. error: {err}\nStack trace:\n{stack_trace}"
                 )
                 error_entry = {"num": index, "err": str(err), "trace": stack_trace}
                 DLQ.append(error_entry)
