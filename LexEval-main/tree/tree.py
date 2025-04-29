@@ -95,9 +95,7 @@ class ReadTree(AbstractTree):
         self.rag_closest_match = (
             [] if prev_state is None else prev_state["rag_closest_match"]
         )
-        self.gt_passage = (
-            [] if prev_state is None else prev_state["gt_passage"]
-        )
+        self.gt_passage = [] if prev_state is None else prev_state["gt_passage"]
 
     @staticmethod
     def load_read_tree(file_path: str) -> "ReadTree":
@@ -105,11 +103,12 @@ class ReadTree(AbstractTree):
         Load a pickled ReadTree, forcing every tensor inside to CPU.
         Works even if the file was written on a CUDA box.
         """
+
         class _CPUUnpickler(pickle.Unpickler):
             def find_class(self, module, name):
-                if module == 'torch.storage' and name == '_load_from_bytes':
+                if module == "torch.storage" and name == "_load_from_bytes":
                     # route all tensor blobs through torch.load(..., map_location='cpu')
-                    return lambda b: torch.load(io.BytesIO(b), map_location='cpu')
+                    return lambda b: torch.load(io.BytesIO(b), map_location="cpu")
                 return super().find_class(module, name)
 
         with open(file_path, "rb") as fh:
@@ -120,6 +119,17 @@ class ReadTree(AbstractTree):
 
 class Tree(AbstractTree):
     def __init__(self, root_prompt, **kwargs):
+        """
+        Parameters expected in kwargs:
+            - eval (bool): Whether running in evaluation mode.
+            - generator (Optional[GeneratorModel]): Only if eval=True. Model used for answer generation.
+            - ner_model (Optional[NERModel]): Named Entity Recognition model (used if eval=False).
+            - embedder (EmbedAdapter): Embedding model, used in all modes.
+            - sem_perturber (SemanticPerturber): Semantic perturbation model (used if eval=False).
+            - syn_perturber (SyntacticPerturber): Syntactic perturbation model (optional, used if eval=False).
+            - s_uri_code (str): ID or code used when retrieving ground truth passages (used if eval=False).
+            - prev_state (Optional[dict]): Previous tree state for resuming/continuing (optional).
+        """
         # answer model
         is_eval = kwargs.get("eval", False)
         if is_eval:
@@ -163,7 +173,7 @@ class Tree(AbstractTree):
             self.ner_entities = self.rag.search_entities_NER(prompt=root_prompt)
             self.root.rag_closest_match = closest_match
             self.root.wiki_title = [w["title"] for w in wiki_data]
-            
+
         self.thresholds = [] if prev_state is None else prev_state["thresholds"]
         self.prompt_list = (
             [root_prompt] if prev_state is None else prev_state["prompt_list"]
@@ -208,13 +218,13 @@ class Tree(AbstractTree):
             for _ in range(self.num_semantic):
 
                 Timers.start(index, "create tree", "generate_semantic_node")
-                semantic_node, have_children = self.generate_semantic_node(
+                semantic_node, is_valid = self.generate_semantic_node(
                     self.root.prompt, node, upper_thresh, lower_thresh, index
                 )
                 Timers.end(index, "create tree", "generate_semantic_node")
-                node.add_child(semantic_node)
                 # semantic node can have children
-                if have_children:
+                if is_valid:
+                    node.add_child(semantic_node)
                     queue.append((semantic_node, level + 1))
             sem_time = time.time()
 
@@ -278,57 +288,61 @@ class Tree(AbstractTree):
         """
         Generates a valid semantic perturbation and creates a SemanticNode.
         """
-        have_children = True
-        original_prompt = parent_node.prompt
-        
+
         #####################################################################
         Timers.start(index, "create tree", "prompt_perturbation")
-        perturb_pkg = PromptPackage(text=original_prompt,
-                            state={"root_prompt": root_prompt})
-        perturbation = self.sem_perturber.sem_perturb(perturb_pkg)
+        # if root -> construct new state
+        new_state = {
+            **parent_node.metadata,             # spreads metadata if any (or does nothing if {})
+            "root_prompt": root_prompt,         # always set
+            **({"base_prompt": root_prompt}     # only add when metadata is empty
+            if not parent_node.metadata
+            else {}),
+        }
+        perturb_pkg = PromptPackage(text=parent_node.prompt, state=new_state)
+        new_perturb_pkg: PromptPackage = self.sem_perturber.sem_perturb(perturb_pkg)
         # unpack results
-        perturbation = perturb_pkg.text           # the new prompt
-        perturb_state = perturb_pkg.state          # metadata collected by perturbers
-        
+        perturbation = new_perturb_pkg.text  # the new prompt
+        perturb_state = new_perturb_pkg.state  # metadata collected by perturbers
+
         perturb_embedding = self.embed_model.encode(perturbation)
         parent_embedding = parent_node.embedding
         root_embedding = self.root.embedding
         sem_sim = similarity(perturb_embedding, parent_embedding)
         root_sim = similarity(perturb_embedding, root_embedding)
 
-        is_valid =  (perturbation not in self.prompt_list    # duplicate check
-                    and perturb_state.get("is_valid", True)) # perturber-level checks passed
-    
+        is_valid = (
+            perturbation not in self.prompt_list  # duplicate check
+            and perturb_state.get("is_valid", True)
+        )  # perturber-level checks passed
+        Timers.end(index, "create tree", "prompt_perturbation")
         if is_valid:
             self.prompt_list.append(perturbation)
-        else:
-            have_children = False
-        Timers.end(index, "create tree", "prompt_perturbation")
-        #####################################################################
-        # Calculate Flesch-Kincaid Grade Level and Dale-Chall Readability Score
-        fk_score = textstat.flesch_kincaid_grade(perturbation)
-        dc_score = textstat.dale_chall_readability_score(perturbation)
-        complexity_score = (fk_score + dc_score) / 2
+            #####################################################################
+            # Calculate Flesch-Kincaid Grade Level and Dale-Chall Readability Score
+            fk_score = textstat.flesch_kincaid_grade(perturbation)
+            dc_score = textstat.dale_chall_readability_score(perturbation)
+            complexity_score = (fk_score + dc_score) / 2
 
-        Timers.start(index, "create tree", "retrieve_wiki_data_post_perturb")
-        wiki_data = self.rag.retrieve_wiki_data_2(perturbation)
-        Timers.end(index, "create tree", "retrieve_wiki_data_post_perturb")
+            Timers.start(index, "create tree", "retrieve_wiki_data_post_perturb")
+            wiki_data = self.rag.retrieve_wiki_data_2(perturbation)
+            Timers.end(index, "create tree", "retrieve_wiki_data_post_perturb")
 
-        # new: introducing extraneous wiki passage post retrieval from retrieval
-        Timers.start(index, "create tree", "construct_retrieved_evidence")
-        closest_match = self.construct_retrieved_evidence(index, wiki_data, perturbation)
-        Timers.end(index, "create tree", "construct_retrieved_evidence")
+            # new: introducing extraneous wiki passage post retrieval from retrieval
+            Timers.start(index, "create tree", "construct_retrieved_evidence")
+            closest_match = self.construct_retrieved_evidence(
+                index, wiki_data, perturbation
+            )
+            Timers.end(index, "create tree", "construct_retrieved_evidence")
 
-        Timers.start(index, "create tree", "search_entities_2")
-        rag_entities = self.rag.search_entities_2(prompt=perturbation)
-        Timers.end(index, "create tree", "search_entities_2")
+            Timers.start(index, "create tree", "search_entities_2")
+            rag_entities = self.rag.search_entities_2(prompt=perturbation)
+            Timers.end(index, "create tree", "search_entities_2")
 
-        Timers.start(index, "create tree", "search_entities_NER")
-        ner_entities = self.rag.search_entities_NER(perturbation)
-        Timers.end(index, "create tree", "search_entities_NER")
-
-        return (
-            SemanticNode(
+            Timers.start(index, "create tree", "search_entities_NER")
+            ner_entities = self.rag.search_entities_NER(perturbation)
+            Timers.end(index, "create tree", "search_entities_NER")
+            sem_node = SemanticNode(
                 perturbation,
                 sem_sim,
                 root_sim,
@@ -342,10 +356,18 @@ class Tree(AbstractTree):
                 fk_score=fk_score,
                 dc_score=dc_score,
                 complexity_score=complexity_score,
-                is_duplicate=have_children,
-            ),
-            have_children,
-        )
+            )
+            # update metadata
+            sem_node.metadata.update()
+            return (sem_node, is_valid)
+        else:
+            # invalid semantic node
+            logging.error(
+                "Encountered invalid perturbation; state=%s, perturbation=%s",
+                perturb_state,
+                perturbation,
+            )
+            return (None, is_valid)
 
     def make_thresholds(self, distribution, upper_bound, lower_bound, depth):
         if distribution == "linear":

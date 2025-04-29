@@ -79,7 +79,6 @@ class SemanticNode(Node):
         complexity_score=0,
         fk_score=0,
         dc_score=0,
-        is_duplicate=False
         
     ):
         super().__init__("semantic", prompt, parent)
@@ -94,7 +93,6 @@ class SemanticNode(Node):
         self.fk_score = fk_score
         self.dc_score = dc_score
         self.wiki_title = wiki_title
-        self.is_duplicate = is_duplicate
 
     def to_dict(self):
         return {

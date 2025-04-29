@@ -5,7 +5,7 @@ import pickle
 import random
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List
 
 import numpy as np
@@ -22,7 +22,7 @@ from similarity.cosine_similarity import similarity
 # ---------------------------------------------------------------------------
 
 def clear_cache() -> None:
-    """Aggressively free CUDA & Python memory."""
+    """ free CUDA & Python memory."""
     for obj in gc.get_objects():
         try:
             if torch.is_tensor(obj) and obj.is_cuda:
@@ -39,6 +39,7 @@ def clear_cache() -> None:
 # ---------------------------------------------------------------------------
 
 @dataclass
+# constructed per node basis
 class PromptPackage:
     """Carries the evolving prompt plus arbitrary metadata/state."""
 
@@ -86,7 +87,7 @@ class CombinedPerturber(SemanticPerturber):
         for p in self.perturbers:
             p.setup_for_tree(prompt)
 
-    def sem_perturb(self, pkg: PromptPackage, **kwargs) -> PromptPackage:  # noqa: D401
+    def sem_perturb(self, pkg: PromptPackage, **kwargs) -> PromptPackage:
         for p in self.perturbers:
             pkg = p.sem_perturb(pkg, **kwargs)
         return pkg
@@ -123,7 +124,7 @@ class ParaphrasePerturber(SemanticPerturber):
         max_retries: int = 5,
         min_temp: float = 0.7,
         max_temp: float = 1.5,
-        upper_thresh: float = 0.99,
+        upper_thresh: float = 0.995,
         lower_thresh: float = 0.849,
         **kwargs,
     ) -> PromptPackage:
@@ -152,7 +153,9 @@ class ParaphrasePerturber(SemanticPerturber):
             )
             new_p, _ = self.model.complete(chat, temperature=temp)
             return new_p.strip()
-
+        
+        candidate= ""
+        
         while not is_valid and retry < max_retries:
             temperature = min(max_temp, min_temp + 1.5 * (retry / max_retries))
             logging.info("Paraphrase retry %d, temp=%.2f", retry, temperature)
@@ -166,11 +169,19 @@ class ParaphrasePerturber(SemanticPerturber):
             is_unique = candidate not in self.prompt_history
             within_bounds = lower_thresh <= sim <= upper_thresh
             is_valid = is_unique and within_bounds
-
+    
             if is_valid:
-                pkg.text = candidate
-                pkg.state["similarity"] = sim
-                pkg.state["is_valid"] = True
+                new_state = {
+                    **pkg.state,
+                    "similarity": sim,
+                    "is_valid": True,
+                }
+                # Construct and return a new PromptPackage (no in-place mutation)  
+                new_pkg = replace(
+                    pkg,
+                    text=candidate,
+                    state=new_state
+                )
             else:
                 retry += 1
                 if not is_unique:
@@ -181,13 +192,29 @@ class ParaphrasePerturber(SemanticPerturber):
                     failure_reason = f"similarity {sim:.3f} above upper threshold {upper_thresh}"
                 else:
                     failure_reason = "unknown"
+                    
+            # add to ban list if rejected or accepted
+            if candidate and candidate not in self.prompt_history:
+                self.prompt_history.append(candidate)
+                
         if not is_valid:
             logging.info(
                 "generate_semantic_node: could not generate a unique perturbation. Reason: %s",
                 failure_reason,
             )
-
-        return pkg
+            # return last candidate as invalid perturbed text
+            new_state = {
+                    **pkg.state,
+                    "similarity": sim,
+                    "is_valid": False,
+                }
+            # Construct and return a new PromptPackage (no in-place mutation)  
+            new_pkg = replace(
+                pkg,
+                text=candidate,
+                state=new_state
+            )
+        return new_pkg
 
     def post_process(self):
         self.prompt_history.clear()
@@ -256,6 +283,7 @@ class PrefixPerturber(SemanticPerturber):
         last_candidate, last_idx = None, None
         T = T_init
 
+        # TODO: batch encoding
         for _ in range(K):
             ctx, title, content, idx = self.knowledge_graph.get_next_document()
             candidate_prefix  = ctx.strip()
@@ -279,10 +307,22 @@ class PrefixPerturber(SemanticPerturber):
             _, _, _, best_idx = self.knowledge_graph.get_next_document()
 
         self.knowledge_graph.update_visit_status(best_idx)
+        
+        new_state = {
+            **pkg.state,
+            "base_prompt": pkg.state.get("base_prompt", base_prompt),
+            "prefix_similarity": -best_score,
+            "is_valid": True,
+            "prefix_text": f"{pkg.state.get("prefix_text", "")} {best_prefix}".strip(),
+        }
 
-        pkg.text = f"{best_prefix} {base_prompt}".strip()
-        pkg.state["prefix_similarity"] = -best_score  # positive similarity
-        return pkg
+        # Construct and return a new PromptPackage (no in-place mutation)  
+        new_pkg = replace(
+            pkg,
+            text=f"{best_prefix} {base_prompt}".strip(),
+            state=new_state
+        )
+        return new_pkg
 
 
     def post_process(self):
