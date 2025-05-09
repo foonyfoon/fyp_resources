@@ -2,17 +2,15 @@ import json
 import concurrent.futures
 from typing import List, Dict, Any, Tuple
 import logging
-import requests
+import random
 
-import wikipedia
-import textwrap
 import spacy
 import torch
 import torch.nn.functional as F
 
 from adapters.SemanticAdapter import SemanticAdapter 
 from adapters.OAI_Embeddings import EmbedAdapter
-from utils.wiki_helper import WikiHelper
+from utils.wiki_helper import WikiHelper, get_exact_page_from_entity
 from similarity.cosine_similarity import similarity, similarities
 
 class RAGAgent:
@@ -58,40 +56,13 @@ class RAGAgent:
     
     
     def find_gt_passage(self, wiki_data_entity: str, prompt: str):
-        # Step 1: Fetch entity data from Wikidata
-        url = f"https://www.wikidata.org/wiki/Special:EntityData/{wiki_data_entity}.json"
-        response = requests.get(url)
-        if response.status_code != 200:
-            raise Exception(f"Failed to fetch data for entity {wiki_data_entity}")
-        
-        data = response.json()
-        entity = data["entities"][wiki_data_entity]
+        # Fetch Wikipedia page details (summary, content, and URL)
+        page = get_exact_page_from_entity(wiki_data_entity)
+        title = page.title
+        summary = page.summary
+        content = page.content
+        url = page.url
 
-        # Step 2: Get the English Wikipedia page title from sitelinks
-        sitelinks = entity.get("sitelinks", {})
-        enwiki = sitelinks.get("enwiki")
-        if not enwiki:
-            raise Exception("No English Wikipedia link found for this entity.")
-        
-        title = enwiki["title"]
-        wikipedia.set_lang("en")
-
-        try:
-            summary = wikipedia.summary(title)
-            content = wikipedia.page(title).content
-            url = wikipedia.page(title).url
-        except wikipedia.exceptions.PageError:
-            raise Exception("Wikipedia page not found.")
-        except wikipedia.exceptions.DisambiguationError as e:
-            raise Exception(f"Disambiguation error: {e.options}")
-
-        # Step 4: Prepare the page data and combined text
-        # page_data = {
-        #     "title": title,
-        #     "content": content[:4000],
-        #     "summary": summary,
-        #     "url": url
-        # }
         page_text = f"Title: {title}\n{content[:4000]}"
 
         page_data = {
@@ -196,14 +167,21 @@ class RAGAgent:
     
     def retrieve_wiki_data_2(self, prompt: str, **kwargs) -> List[Dict]:
         # Get entities in query
+        # TODO: better way to handle this 
         entities = self.search_entities_2(prompt)
+        # randomly select 7 entries if more than 7
+        if len(entities) > 7:
+            entities = random.sample(entities, 7)
         wiki_data = []
-        
+        # TODO: better way to handle this 
+        results_num = 4 if len(entities) < 2 else 2
         # Create a ThreadPoolExecutor to fetch wiki data concurrently for each entity.
         with concurrent.futures.ThreadPoolExecutor() as executor:
             # Submit all tasks concurrently
             future_to_entity = {
-                executor.submit(self.wiki_helper.get_wiki_page, entity=entity): entity 
+                executor.submit(self.wiki_helper.get_wiki_page,
+                                entity=entity,
+                                results_num=results_num): entity 
                 for entity in entities
             }
             

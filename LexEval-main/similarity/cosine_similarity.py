@@ -26,7 +26,11 @@ def similarity(embedding1: Union[np.ndarray, torch.Tensor],
     
     
 def similarities(db_embeddings: torch.Tensor, prompt_embedding: torch.Tensor) -> torch.Tensor:
-    db_embeddings = F.normalize(db_embeddings, p=2, dim=1)
-    prompt_embedding = F.normalize(prompt_embedding, p=2, dim=1)
-    similarities = torch.matmul(db_embeddings, prompt_embedding.T)
-    return similarities
+    db_embeddings = F.normalize(db_embeddings, p=2, dim=1) # (n, h)
+    prompt_embedding = F.normalize(prompt_embedding, p=2, dim=1) # size (m, h)
+    sims = torch.matmul(db_embeddings, prompt_embedding.T) # (n, m)
+    # if we have more than one prompt, reshape to (m, n, 1)
+    if prompt_embedding.size(0) > 1:
+        sims = sims.T.unsqueeze(-1) # (m, n, 1)
+
+    return sims

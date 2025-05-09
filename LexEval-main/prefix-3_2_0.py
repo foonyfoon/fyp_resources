@@ -12,18 +12,15 @@ from utils.timer import Timers
 from wiki_cache.db import engine, Session
 import wiki_cache.models as models
 from wiki_cache.cache import clear_cache_db
+from utils.dataset_sampling import read_dataset
 
-import pandas as pd
 import torch
-from sklearn.model_selection import train_test_split
 
 import os
 import logging
 import time
 from datetime import datetime
 import gc
-import sys
-import re
 import traceback
 import argparse
 import utils.constants as constants
@@ -122,8 +119,7 @@ def get_question_tree(
             )
             question = row["question"]
             possible_answers = row["possible_answers"]
-            s_uri = row["s_uri"]
-            s_uri_code = s_uri.rstrip("/").split("/")[-1]
+            s_wiki_title = row["s_wiki_title"]
             og_index = row["original_index"]
 
             if not os.path.exists("trees/"):
@@ -139,7 +135,7 @@ def get_question_tree(
                     syn_perturber=syntactic_adapter,
                     ner_model=ner_model,
                     embedder=embedder,
-                    s_uri_code=s_uri_code,
+                    s_wiki_title=s_wiki_title,
                 )
                 test_tree.make_tree(*tree_size, index=index)
                 test_tree.set_possible_answers(possible_answers)
@@ -164,56 +160,6 @@ def get_question_tree(
             logging.error(f"RuntimeError encountered on attempt {retry_count}: {err}")
             if retry_count == max_retries:
                 raise err
-
-
-def read_dataset(size, columns=None):
-    if not os.path.exists(constants.SHUFFLED_FILE):
-        if not os.path.exists(constants.DF_LOCATION):
-            # Ensure the directory exists
-            dir = os.path.dirname(constants.DF_LOCATION)
-            if not os.path.exists(dir):
-                os.makedirs(dir)
-
-            # Read original dataset
-            df = pd.read_csv("hf://datasets/akariasai/PopQA/test.tsv", sep="\t")
-            logging.info("read from hf source")
-        else:
-            # Load already saved dataset
-            df = pd.read_csv(constants.DF_LOCATION)
-            logging.info("read from local source")
-
-        # Ensure the directory exists
-        dir = os.path.dirname(constants.SHUFFLED_FILE)
-        if not os.path.exists(dir):
-            os.makedirs(dir)
-
-        # Add original index as a column
-        df["original_index"] = df.index
-
-        # Shuffle dataset with original index column preserved
-        # df_shuffled = df.sample(frac=1, random_state=seed)
-        size_ratio = round(size / len(df), 2) 
-        # Split the data to get a subset with the same distribution of classes
-        _, df_shuffled, _, _ = train_test_split(
-            df,
-            df["prop"],
-            test_size=size_ratio,
-            shuffle=True,
-            random_state=constants.SEED,
-            stratify=df["prop"]
-        )
-        # Save shuffled dataset
-        df_shuffled.to_csv(constants.SHUFFLED_FILE, index=False)
-        
-        logging.info(f"df_shuffled saved to {constants.SHUFFLED_FILE}")
-
-    # Load already saved shuffled dataset
-    if columns is None:
-        df_shuffled = pd.read_csv(constants.SHUFFLED_FILE)
-    else:
-        df_shuffled = pd.read_csv(constants.SHUFFLED_FILE, usecols=columns)
-
-    return df_shuffled
 
 
 def select_perturber(type: str, params: dict) -> SemanticPerturber:
@@ -263,16 +209,17 @@ def get_generator(modelId: str) -> ParaphrasePerturber:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Script with strategy and model flags, plus 2 required integers.")
+    parser = argparse.ArgumentParser(description="Script with strategy and model flags, plus 2 required integers + dataset name.")
     
     # Optional named flags
     parser.add_argument("--strategy", type=str, default=strategy, help="Strategy to use (e.g., prefix, para-prefix)")
     parser.add_argument("--gen_modelId", type=str, default=gen_modelId, help="Generation model ID (e.g., google/gemma-3-12b-it)")
     parser.add_argument("--eval_only", action="store_true", help="Flag to run in evaluation-only mode.")
 
-    # Compulsory positional integers
+    # Compulsory positional integers and dataset name
     parser.add_argument("start_idx", type=int, help="starting index for processing of dataset.")
     parser.add_argument("end_idx", type=int, help="ending index for processing of dataset.")
+    parser.add_argument("dataset_name", type=str, help="questions to answer (POPQA, TQA).")
     
     return parser.parse_args()
 
@@ -295,8 +242,8 @@ def main():
     eval_only = args.eval_only
     start_idx = args.start_idx
     end_idx = args.end_idx
+    dataset_name = args.dataset_name
     update_params()
-    # ########################################################
      
     formatted_time = datetime.fromtimestamp(time.time()).strftime("%m-%d-%H:%M")
     filename = f"/vol/bitbucket/lst20/logs/{formatted_time}_{start_idx}_to_{end_idx}_{statrgy_path}.log"
@@ -327,7 +274,9 @@ def main():
     start_time = time.time()
         
     df = read_dataset(
-        constants.EVAL_SIZE, columns=["question", "possible_answers", "s_uri", "original_index"]
+        name=dataset_name,
+        size=constants.EVAL_SIZE,
+        columns=["question", "possible_answers", "s_wiki_title", "original_index"]
     )
     
     if not eval_only:
@@ -432,5 +381,7 @@ def main():
         f"done! time to evaluate {end_idx - start_idx + 1} trees: {time_taken}"
     )
 
+
+# example: prefic-3_2_0 10 150 --strategy=prefix --eval_only --gen_modelId=google/gemma-3-1b-it
 if __name__ == "__main__":
     main()

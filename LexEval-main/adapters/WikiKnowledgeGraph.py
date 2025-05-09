@@ -13,8 +13,7 @@ import random
 import time
 import logging
 
-from adapters.OAI_Embeddings import EmbedAdapter
-from utils.wiki_helper import WikiHelper
+from utils.wiki_helper import WikiHelper, get_exact_page_from_entity
 class RootNode:
     def __init__(self, title: str):
         self.title = title
@@ -84,16 +83,15 @@ class KnowledgeGraph:
         self.visited_doc_flags = [False] * len(self.ordered_docs)
         
             
-    def link_importance(self, title: str, content: str) -> int:
-            """Returns an importance score for a link based on its presence in the text"""
-            score = 0
-            title_lower = title.lower()
-            content_lower = content.lower()
-
-            score += content_lower.count(title_lower)
-            if title_lower in content_lower[:500]:  # check if in summary-like start
-                score += 3
-            return score
+    def link_importance(self, title: str, content: str,  summary: str) -> int:
+        """Returns an importance score for a link based on its presence in the text"""
+        score = 0
+        title_lower = title.lower()
+        content_lower = content.lower()
+        summary_lower = content.lower()
+        score += content_lower.count(title_lower)
+        score += (summary_lower.count(title_lower) * 2)
+        return score
 
 
     def rank_sentences_by_tfidf(self, article: str) -> List[str]:
@@ -132,34 +130,29 @@ class KnowledgeGraph:
         '''
         start_time = time.time()
         
-        # tree_size = sum([pow(size[1], exponent) for exponent in range(size[0])]) - 1 # not counting root
-        # num_kg_nodes = sum([pow(kg_size[1], exponent) for exponent in range(kg_size[0])]) - 1 # nor counting root and first layer
-        # doc_per_tree_node = 10
-        # num_preturb_tree_node = num_kg_nodes
-        
         # 1. Initialize root node with the start entity
         root = RootNode(start_entity)
         root.visited = {start_entity}
         queue = deque()
         
-        pages = wikipedia.search(start_entity, results=top_k)
-        print(f"create_graph root pages: {pages}")
+        # 2. Fetch the Wikipedia page for the start entity
+        wiki_page = get_exact_page_from_entity(start_entity)
         
-        # 2. Fetch relevant pages related to the start entity
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = {executor.submit(self.wiki_helper.fetch_wiki_page_with_retry, title): title for title in pages}
-            for future in concurrent.futures.as_completed(futures):
-                wiki_page = future.result()
-                if not wiki_page:
-                    continue  # Skip pages that couldn't be fetched or are ambiguous.
-                node = PageNode(wiki_page['title'],
-                                wiki_page['summary'],
-                                wiki_page['content'],
-                                wiki_page['url'])
-                node.document_list = self.get_k_documents(node.content)
-                root.add_child(node)
-                root.visited.add(wiki_page['title'])
-                queue.append((node, wiki_page))
+        node = PageNode(wiki_page.title,
+                        wiki_page.summary,
+                        wiki_page.content,
+                        wiki_page.url)
+        node.document_list = self.get_k_documents(node.content)
+        root.add_child(node)
+        root.visited.add(wiki_page.title)
+        page_dict = {
+            "title":wiki_page.title,
+            "summary":wiki_page.summary,
+            "content":wiki_page.content,
+            "url":wiki_page.url,
+            'links': wiki_page.links,
+            }
+        queue.append((node, page_dict))
         
         # 3. BFS expansion
         for i in range(k_hop):
@@ -167,20 +160,21 @@ class KnowledgeGraph:
             while queue:
                 parent_node, parent_page = queue.popleft()
                 try:
-                    links = list(set(parent_page["links"]))
+                    links = list(set(parent_page['links']))
+
                 except wikipedia.exceptions.DisambiguationError:
-                    logging.info("create_graph: wikipedia.exceptions.DisambiguationError: no links?")
+                    logging.error("create_graph: wikipedia.exceptions.DisambiguationError: no links?")
                 link_weights = []
                 valid_links = []
                 for link in links:
                     if link not in root.visited:
                         try:
-                            weight = self.link_importance(link, parent_page["content"])
+                            weight = self.link_importance(link, parent_page['content'],  parent_page['summary'])
                             link_weights.append(weight)
                             valid_links.append(link)
-                        except Exception:
-                            logging.info("create_graph: Exception weights")
-
+                        except Exception as e:
+                            logging.error("create_graph: Exception weights", e)
+                
                 # Sort valid_links based on weights and select the top_k links.
                 sorted_indices = sorted(range(len(link_weights)), key=lambda i: link_weights[i])
                 top_indices = sorted_indices[:min(len(valid_links), top_k)]  # Use valid_links length here.
@@ -202,7 +196,7 @@ class KnowledgeGraph:
                         
             queue = to_process
 
-        print(f"--- create graph: {time.strftime('%H:%M:%S', time.gmtime(time.time() - start_time))} ---")
+        logging.info(f"--- create graph: {time.strftime('%H:%M:%S', time.gmtime(time.time() - start_time))} ---")
         return root
 
         
@@ -246,7 +240,7 @@ class KnowledgeGraph:
                 queue.append(child)
         
         unordered_docs = [(doc_db[i], title_db[i], content_db[i]) for i in range(len(doc_db))]
-        print(f"--- get_unordered_docs: {time.strftime('%H:%M:%S', time.gmtime(time.time() - start_time))} seconds ---")
+        logging.info(f"--- get_unordered_docs: {time.strftime('%H:%M:%S', time.gmtime(time.time() - start_time))} seconds ---")
         return unordered_docs
 
     def get_next_document(self):

@@ -41,6 +41,7 @@ class RobertaEmbedder(EmbedAdapter):
         else:
             return embeddings  # (batch_size, hidden_size)
 
+# I dont think this is used anywhere
 class ContrieverEmbedder(EmbedAdapter):
     def __init__(self):
         self.model = AutoModel.from_pretrained("facebook/contriever")

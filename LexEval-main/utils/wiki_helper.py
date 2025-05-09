@@ -7,13 +7,15 @@ import time
 
 import numpy as np
 import wikipedia
+from wikipedia import WikipediaPage
 import torch
+import requests
 
 class WikiHelper:
     def __init__(self, encoder):
         self.encoder: EmbedAdapter = encoder
         
-    def get_wiki_page(self, entity: str) -> list:
+    def get_wiki_page(self, entity: str, results_num: int = 2) -> list:
         wiki_data = []
 
         # 1. Try fetching from the cache
@@ -35,7 +37,7 @@ class WikiHelper:
             return wiki_data
 
         # 2. Otherwise, fetch from Wikipedia
-        search_results = wikipedia.search(entity, results=5)
+        search_results = wikipedia.search(entity, results=results_num)
         for result_title in search_results:
             page_data = self.fetch_wiki_page_with_retry(result_title)
             if page_data is None:
@@ -92,6 +94,7 @@ class WikiHelper:
                     # selects random page since extraneous info does not have to be exact
                     logging.error(f"wikipedia.exceptions.DisambiguationError for '{page_title}'. picking random")
                     s = random.choice(e.options)
+                    
                     page = wikipedia.page(s)
                     return {
                         "title": page.title,
@@ -109,3 +112,14 @@ class WikiHelper:
                     delay += random.uniform(0, 1)
                     logging.info(f"Error fetching page '{page_title}': {e}. Retrying in {delay:.2f} seconds (attempt {attempt}/{max_retries}).")
                     time.sleep(delay)
+
+
+def get_exact_page_from_entity(wiki_title) -> WikipediaPage:
+    # Fetch Wikipedia page details (summary, content, and URL)
+    try:
+        page = wikipedia.page(wiki_title, redirect=False, auto_suggest=False)
+        return page
+    except wikipedia.exceptions.PageError:
+        raise Exception("Wikipedia page not found.")
+    except wikipedia.exceptions.DisambiguationError as e:
+        raise Exception(f"get_exact_page_from_entity Disambiguation error: {e.options}")

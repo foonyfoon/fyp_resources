@@ -6,9 +6,15 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import numpy as np
+import evaluate
+from evaluate import logging
+from torch.nn import CrossEntropyLoss
+import torch
+import datasets
 
 from collections import deque
 import json
+import math
 
 gen_models = ["google/gemma-3-12b-it", "google/gemma-3-1b-it", "mistral.mistral-7b-instruct-v0:2"]
 
@@ -26,7 +32,6 @@ model_colors = {
     'google/gemma-3-12b-it': 'blue',
     'mistral.mistral-7b-instruct-v0:2': 'red',
 }
-
 
 def read_trees_to_df(strategy: str, gen_modelId: str) -> pd.DataFrame:
     '''
@@ -51,6 +56,11 @@ def read_trees_to_df(strategy: str, gen_modelId: str) -> pd.DataFrame:
     - syntax_similarity_score
     ---------------------
     '''
+    
+    def extract_similarity(meta):
+        if isinstance(meta, dict) and 'similarity' in meta:
+            return meta['similarity']
+        return 1
     strategy_path = constants.STRATEGY_PATH_DICT[strategy]
     tree_dir_path = f"/vol/bitbucket/lst20/treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/"
 
@@ -72,14 +82,14 @@ def read_trees_to_df(strategy: str, gen_modelId: str) -> pd.DataFrame:
                 node, layer = queue.popleft()
                 base_found_match = False
                 base_found_rag_match = False
-                base_response = node.answers[gen_modelId]["base"]
-                base_rag_response = node.answers[gen_modelId]["base_rag"]
+                base_response = node.answers[gen_modelId]["base"].lower()
+                base_rag_response = node.answers[gen_modelId]["base_rag"].lower()
                 for expected_answer in json.loads(possible_answers):
-                    if base_response.__contains__(expected_answer):
+                    if base_response.__contains__(expected_answer.lower()):
                         base_found_match = True
                         break
                 for expected_answer in json.loads(possible_answers):
-                    if base_rag_response.__contains__(expected_answer):
+                    if base_rag_response.__contains__(expected_answer.lower()):
                         base_found_rag_match = True
                         break
                     
@@ -92,7 +102,9 @@ def read_trees_to_df(strategy: str, gen_modelId: str) -> pd.DataFrame:
                     "prompt": node.prompt,
                     "rag_closest_match": getattr(node, "rag_closest_match", None),
                     "rag_entities": getattr(node, "rag_entities", None),
+                    "possible_answers": possible_answers,
                     "answers": node.answers,
+                    "metadata": node.metadata,
                     "wiki_title": getattr(node, "wiki_title", None),
                     "base_found_rag_match": base_found_rag_match, 
                     "base_found_match": base_found_match, 
@@ -121,8 +133,18 @@ def read_trees_to_df(strategy: str, gen_modelId: str) -> pd.DataFrame:
             pass
         except Exception as e:
             print(f"Error loading tree: {e}")
+    df = pd.DataFrame(rows)
+    
+    df['similarity'] = df['metadata'].apply(extract_similarity)
+    df = df[df['similarity'] >= 0.849]
+    # Convert nested dicts into a DataFrame
+    base_rag_df = df['answers'].apply(lambda d: list(d.values())[0] if isinstance(d, dict) else {}).apply(pd.Series)
 
-    return pd.DataFrame(rows)
+    # Merge back into the original DataFrame
+    df = pd.concat([df, base_rag_df[['base', 'base_rag']]], axis=1)
+    df = df.drop(columns=['answers'])
+
+    return df
 
 
 def plot_by_layer(df, gen_models, title):
@@ -264,3 +286,124 @@ def plot_models_by_layer(
     fig.suptitle(f'RAG Change fro {title} by Model & Layer', fontsize=18)
     plt.tight_layout()
     plt.show()
+
+
+def get_model(modelId: str) :
+    if "gemma-3" in modelId.lower():
+        from model.engine import Gemma3Adapter
+        adapter: Gemma3Adapter = Gemma3Adapter(modelId)
+    elif "gemma" in modelId.lower():
+        from model.engine import GemmaAdapter
+        adapter: GemmaAdapter = GemmaAdapter(modelId)
+    elif "mistral" in modelId.lower():
+        from model.engine import MistralInstructAdapter
+        adapter = MistralInstructAdapter('mistralai/Mistral-7B-Instruct-v0.2')
+    else:
+        raise NotImplementedError(f"No adapter implemented for: {modelId}")
+    return adapter.model, adapter.tokenizer, adapter.device
+
+
+class Perplexity(evaluate.Metric):
+    # Adapted from the original Hugging Face Evaluate Perplexity metric implementation:
+    # https://github.com/huggingface/evaluate/blob/main/metrics/perplexity/perplexity.py
+    #
+    # Copyright 2022 The HuggingFace Datasets Authors and the current dataset script contributor.
+    # Licensed under the Apache License, Version 2.0.
+    #
+    # This adaptation allows integration with custom model loading logic and eval the quantized version
+    def _info(self):
+        return evaluate.MetricInfo(
+            module_type="metric",
+            description="_DESCRIPTION",
+            citation="_CITATION",
+            inputs_description="_KWARGS_DESCRIPTION",
+            features=datasets.Features(
+                {
+                    "predictions": datasets.Value("string"),
+                }
+            ),
+            reference_urls=["https://huggingface.co/docs/transformers/perplexity"],
+        )
+
+    def _compute(
+            self, predictions, model_id, batch_size: int = 8, add_start_token: bool = True, max_length=None
+        ):
+            model, tokenizer, device = get_model(model_id)
+            model = model.to(device)
+            
+            PAD_MULTIPLE = 8
+            if max_length:
+                max_length = (max_length // PAD_MULTIPLE) * PAD_MULTIPLE
+            # if batch_size > 1 (which generally leads to padding being required), and
+            # if there is not an already assigned pad_token, assign an existing
+            # special token to also be the padding token
+            if tokenizer.pad_token is None and batch_size > 1:
+                existing_special_tokens = list(tokenizer.special_tokens_map_extended.values())
+                # check that the model already has at least one special token defined
+                assert (
+                    len(existing_special_tokens) > 0
+                ), "If batch_size > 1, model must have at least one special token to use for padding. Please use a different model or set batch_size=1."
+                # assign one of the special tokens to also be the pad token
+                tokenizer.add_special_tokens({"pad_token": existing_special_tokens[0]})
+
+            if add_start_token and max_length:
+                # leave room for <BOS> token to be added:
+                assert (
+                    tokenizer.bos_token is not None
+                ), "Input model must already have a BOS token if using add_start_token=True. Please use a different model, or set add_start_token=False"
+                max_tokenized_len = max_length - 1
+            else:
+                max_tokenized_len = max_length
+
+            encodings = tokenizer(
+                predictions,
+                pad_to_multiple_of=PAD_MULTIPLE,
+                padding=True,
+                max_length=max_tokenized_len,
+                return_tensors="pt",
+                return_attention_mask=True,
+            ).to(device)
+
+            encoded_texts = encodings["input_ids"]
+            attn_masks = encodings["attention_mask"]
+
+            # check that each input is long enough:
+            if add_start_token:
+                assert torch.all(torch.ge(attn_masks.sum(1), 1)), "Each input text must be at least one token long."
+            else:
+                assert torch.all(
+                    torch.ge(attn_masks.sum(1), 2)
+                ), "When add_start_token=False, each input text must be at least two tokens long. Run with add_start_token=True if inputting strings of only one token, and remove all empty input strings."
+
+            ppls = []
+            loss_fct = CrossEntropyLoss(reduction="none")
+
+            for start_index in logging.tqdm(range(0, len(encoded_texts), batch_size)):
+                end_index = min(start_index + batch_size, len(encoded_texts))
+                encoded_batch = encoded_texts[start_index:end_index]
+                attn_mask = attn_masks[start_index:end_index]
+
+                if add_start_token:
+                    bos_tokens_tensor = torch.tensor([[tokenizer.bos_token_id]] * encoded_batch.size(dim=0)).to(device)
+                    encoded_batch = torch.cat([bos_tokens_tensor, encoded_batch], dim=1)
+                    attn_mask = torch.cat(
+                        [torch.ones(bos_tokens_tensor.size(), dtype=torch.int64).to(device), attn_mask], dim=1
+                    )
+
+                labels = encoded_batch
+
+                with torch.no_grad():
+                    out_logits = model(encoded_batch, attention_mask=attn_mask).logits
+
+                shift_logits = out_logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                shift_attention_mask_batch = attn_mask[..., 1:].contiguous()
+
+                perplexity_batch = torch.exp(
+                    (loss_fct(shift_logits.transpose(1, 2), shift_labels) * shift_attention_mask_batch).sum(1)
+                    / shift_attention_mask_batch.sum(1)
+                )
+
+                ppls += perplexity_batch.tolist()
+
+            return {"perplexities": ppls, "mean_perplexity": np.mean(ppls)}

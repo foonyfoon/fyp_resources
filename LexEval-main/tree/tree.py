@@ -127,7 +127,7 @@ class Tree(AbstractTree):
             - embedder (EmbedAdapter): Embedding model, used in all modes.
             - sem_perturber (SemanticPerturber): Semantic perturbation model (used if eval=False).
             - syn_perturber (SyntacticPerturber): Syntactic perturbation model (optional, used if eval=False).
-            - s_uri_code (str): ID or code used when retrieving ground truth passages (used if eval=False).
+            - s_wiki_title (str): wiki_title used when retrieving ground truth passages (used if eval=False).
             - prev_state (Optional[dict]): Previous tree state for resuming/continuing (optional).
         """
         # answer model
@@ -144,9 +144,9 @@ class Tree(AbstractTree):
             )
             # preturb model
             self.sem_perturber: SemanticPerturber = kwargs.get("sem_perturber")
-            self.sem_perturber.setup_for_tree(root_prompt)
+            s_wiki_title = kwargs.get("s_wiki_title")
+            self.sem_perturber.setup_for_tree(root_prompt, s_wiki_title)
             self.syn_perturber = kwargs.get("syn_perturber")
-            s_uri_code = kwargs.get("s_uri_code")
 
         self.embed_model: EmbedAdapter = kwargs.get("embedder")
         self.root_prompt = root_prompt
@@ -166,8 +166,9 @@ class Tree(AbstractTree):
             self.root.wiki_title = prev_state.get("wiki_title")
         elif not is_eval:
             # Otherwise, run retriever pipeline
+            # root
             wiki_data = self.rag.retrieve_wiki_data_2(root_prompt)
-            self.gt_passage = self.rag.find_gt_passage(s_uri_code, root_prompt)
+            self.gt_passage = self.rag.find_gt_passage(s_wiki_title, root_prompt)
             closest_match = self.construct_retrieved_evidence(0, wiki_data, root_prompt)
             self.rag_entities = self.rag.search_entities_2(prompt=root_prompt)
             self.ner_entities = self.rag.search_entities_NER(prompt=root_prompt)
@@ -358,7 +359,7 @@ class Tree(AbstractTree):
                 complexity_score=complexity_score,
             )
             # update metadata
-            sem_node.metadata.update()
+            sem_node.metadata.update(perturb_state)
             return (sem_node, is_valid)
         else:
             # invalid semantic node

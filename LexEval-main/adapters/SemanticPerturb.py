@@ -15,7 +15,7 @@ import torch
 from adapters.OAI_Embeddings import EmbedAdapter
 from adapters.WikiKnowledgeGraph import KnowledgeGraph
 from model.engine import LLMAdapter
-from similarity.cosine_similarity import similarity
+from similarity.cosine_similarity import similarity, similarities
 
 # ---------------------------------------------------------------------------
 # Generic helpers
@@ -60,11 +60,11 @@ class SemanticPerturber(ABC):
         self.release()
 
     @abstractmethod
-    def setup_for_tree(self, pkg: PromptPackage) -> None:  # noqa: D401 – imperative
+    def setup_for_tree(self, pkg: PromptPackage) -> None:  
         """Prepare any expensive index/graph before perturbations start."""
 
     @abstractmethod
-    def sem_perturb(self, pkg: PromptPackage, **kwargs) -> PromptPackage:  # noqa: D401
+    def sem_perturb(self, pkg: PromptPackage, **kwargs) -> PromptPackage: 
         """Return a *new* package after semantic perturbation."""
 
     @abstractmethod
@@ -83,14 +83,19 @@ class CombinedPerturber(SemanticPerturber):
     def __init__(self, perturbations: List[SemanticPerturber]):
         self.perturbers = perturbations
 
-    def setup_for_tree(self, prompt: str):
+    def setup_for_tree(self, prompt: str, root_entity: str): 
         for p in self.perturbers:
-            p.setup_for_tree(prompt)
+            p.setup_for_tree(prompt, root_entity)
 
     def sem_perturb(self, pkg: PromptPackage, **kwargs) -> PromptPackage:
-        for p in self.perturbers:
+        # temporary logic accounting for para->prefix combo 
+        for p in self.perturbers:           
             pkg = p.sem_perturb(pkg, **kwargs)
-        return pkg
+        prefix = pkg.state.get("prefix_text", "")  
+        base = pkg.state["base_prompt"]
+        new_text = f"{prefix} {base}".strip()
+        # return new PromptPackage with updated .text
+        return replace(pkg, text=new_text)
 
     def post_process(self):
         for p in self.perturbers:
@@ -112,7 +117,7 @@ class ParaphrasePerturber(SemanticPerturber):
         self.prompt_history: list[str] = []  # dedup queue
 
 
-    def setup_for_tree(self, prompt: str):
+    def setup_for_tree(self, prompt: str, root_entity: str): 
         # treat the initial root prompt as already used
         if prompt not in self.prompt_history:
             self.prompt_history.append(prompt)
@@ -159,8 +164,8 @@ class ParaphrasePerturber(SemanticPerturber):
         while not is_valid and retry < max_retries:
             temperature = min(max_temp, min_temp + 1.5 * (retry / max_retries))
             logging.info("Paraphrase retry %d, temp=%.2f", retry, temperature)
-
-            candidate = get_paraphrase(pkg.text, temperature)
+            base_prompt = pkg.state["base_prompt"]
+            candidate = get_paraphrase(base_prompt, temperature)
             sim = similarity(
                 self.embedder.encode(root_prompt),
                 self.embedder.encode(candidate),
@@ -173,6 +178,7 @@ class ParaphrasePerturber(SemanticPerturber):
             if is_valid:
                 new_state = {
                     **pkg.state,
+                    "base_prompt": candidate,
                     "similarity": sim,
                     "is_valid": True,
                 }
@@ -205,6 +211,7 @@ class ParaphrasePerturber(SemanticPerturber):
             # return last candidate as invalid perturbed text
             new_state = {
                     **pkg.state,
+                    "base_prompt": candidate,
                     "similarity": sim,
                     "is_valid": False,
                 }
@@ -240,12 +247,10 @@ class PrefixPerturber(SemanticPerturber):
         self.knowledge_graph: KnowledgeGraph | None = None
         self.root_embeddings: list[np.ndarray] | None = None
 
-    def setup_for_tree(self, prompt: str): 
-        entity_list = self.NER(prompt)
-        root_entity = [li.text for li in list(entity_list.ents)][0] # first entity  
+    def setup_for_tree(self, prompt: str, root_entity: str): 
         # create new knowledge graph instance
         self.knowledge_graph = KnowledgeGraph(
-            root_entity,
+            root_entity, #wiki title
             k_hop=self.k_hop,
             top_k=self.top_k,
             prompt=prompt,
@@ -259,9 +264,9 @@ class PrefixPerturber(SemanticPerturber):
         self,
         pkg: PromptPackage,
         *,
-        K: int = 8,
+        K: int = 15,
         T_init: float = 1.0,
-        T_decay: float = 0.9,
+        T_decay: float = 0.8,
         **kwargs,
     ) -> PromptPackage:
         if not pkg.text:
@@ -271,6 +276,20 @@ class PrefixPerturber(SemanticPerturber):
             emb = self.embedder.encode(prompt)
             sims = [similarity(r, emb) for r in self.root_embeddings]
             return -np.mean(sims)  # lower similarity => higher score
+    
+        def scores(prompts: List[str]) -> List[float]:
+            # TODO: kinda sus?? fix this
+            embs = self.embedder.encode(prompts).to("cuda")  # move embeddings to GPU
+            root_emb_tensor = torch.stack([t.to("cuda") for t in self.root_embeddings]).float()
+            sims = similarities(embs, root_emb_tensor) # can be shape (m, n, 1) / or (n, 1)
+            print("scores: sims.shape", sims.shape)
+            if sims.dim() == 2:  # e.g., shape (n, 1)
+                return sims.squeeze(-1).tolist()  # flatten if needed
+
+            else:  # shape (m, n, 1)
+                sims = sims.squeeze(-1)  # shape (m, n)
+                return (-sims.mean(dim=1)).tolist()  # mean over root embeddings
+        
 
         node_visited: set[str] = set()
         base_prompt = pkg.text
@@ -282,29 +301,57 @@ class PrefixPerturber(SemanticPerturber):
         best_idx = -1
         last_candidate, last_idx = None, None
         T = T_init
-
-        # TODO: batch encoding
-        for _ in range(K):
+    
+        # 1. hoist get_next_document() in seperate for loop (node_visited track visited)
+        prompt_list = []
+        # collect prompts
+        max_attempts = 100
+        attempts = 0
+        while len(prompt_list) < K and attempts < max_attempts:
+            attempts += 1
             ctx, title, content, idx = self.knowledge_graph.get_next_document()
-            candidate_prefix  = ctx.strip()
-            last_candidate, last_idx = candidate_prefix , idx
-            if candidate_prefix  in node_visited:
+            candidate_prefix = ctx.strip()
+            if candidate_prefix in node_visited:
                 continue
-            node_visited.add(candidate_prefix )
-            new_prompt = f"{candidate_prefix } {base_prompt}"
-            new_score = score(new_prompt)
-            delta = new_score - current_score
-            p_accept = min(1, math.exp(math.exp(delta / T)))
-            if random.random() < p_accept:
+            else:
+                node_visited.add(candidate_prefix)
+                new_prompt = f"{candidate_prefix} {base_prompt}"
+                prompt_list.append({
+                    "new_prompt": new_prompt,
+                    "candidate_prefix": candidate_prefix,
+                    "idx": idx
+                })
+        if len(prompt_list) < K:
+            # optionally warn or handle the fact we stopped early
+            logging.warning(
+                f"Stopped after {attempts} attempts; only collected {len(prompt_list)} of {K} prompts."
+            )
+        
+        print("prompt_list: ", prompt_list)
+        # 2. calculate scores
+        sim_scores = scores([p["new_prompt"] for p in prompt_list])
+           
+        for  prompt in prompt_list:
+            candidate_prefix = prompt["candidate_prefix"]
+            new_prompt = prompt["new_prompt"]
+            idx = prompt["idx"]
+            new_score = sim_scores[idx]
+
+            delta = new_score - current_score # new score is smaller if delta is negative
+            p_accept = min(1, math.exp(delta / T))
+            if random.random() <= p_accept:
                 current_prefix, current_prompt, current_score = candidate_prefix , new_prompt, new_score
-                if current_score > best_score:
-                    best_prefix, best_score, best_idx = current_prefix, current_score, idx
+                best_prefix, best_score, best_idx = current_prefix, current_score, idx
             T *= T_decay
 
         if not best_prefix.strip() and last_candidate:
             best_prefix, best_idx = last_candidate, last_idx
-        if best_idx == -1:
-            _, _, _, best_idx = self.knowledge_graph.get_next_document()
+            
+        if best_idx == -1 and prompt_list:
+            random_prompt = random.choice(prompt_list)
+            best_prefix, best_idx = random_prompt["candidate_prefix"], random_prompt["idx"]
+        elif best_idx == -1:
+            _, _, _, best_idx = self.knowledge_graph.get_next_document()  # Final fallback
 
         self.knowledge_graph.update_visit_status(best_idx)
         
@@ -312,7 +359,7 @@ class PrefixPerturber(SemanticPerturber):
             **pkg.state,
             "base_prompt": pkg.state.get("base_prompt", base_prompt),
             "prefix_similarity": -best_score,
-            "is_valid": True,
+            "is_valid": pkg.state.get("is_valid", True),
             "prefix_text": f"{pkg.state.get("prefix_text", "")} {best_prefix}".strip(),
         }
 
