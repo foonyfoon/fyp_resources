@@ -33,7 +33,7 @@ model_colors = {
     'mistral.mistral-7b-instruct-v0:2': 'red',
 }
 
-def read_trees_to_df(strategy: str, gen_modelId: str) -> pd.DataFrame:
+def read_trees_to_df(strategy: str, gen_modelId: str, dataset: str) -> pd.DataFrame:
     '''
     read trees from perturb strategy and generator to pandas df
     columns:
@@ -62,7 +62,7 @@ def read_trees_to_df(strategy: str, gen_modelId: str) -> pd.DataFrame:
             return meta['similarity']
         return 1
     strategy_path = constants.STRATEGY_PATH_DICT[strategy]
-    tree_dir_path = f"/vol/bitbucket/lst20/treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/"
+    tree_dir_path = f"/vol/bitbucket/lst20/{dataset}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/"
 
     rows = []
     df = pd.read_csv(constants.SHUFFLED_FILE)

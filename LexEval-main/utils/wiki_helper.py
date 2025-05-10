@@ -114,7 +114,7 @@ class WikiHelper:
                     time.sleep(delay)
 
 
-def get_exact_page_from_entity(wiki_title) -> WikipediaPage:
+def get_exact_page_from_entity(wiki_title: str) -> WikipediaPage:
     # Fetch Wikipedia page details (summary, content, and URL)
     try:
         page = wikipedia.page(wiki_title, redirect=False, auto_suggest=False)

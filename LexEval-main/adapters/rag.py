@@ -1,6 +1,6 @@
 import json
 import concurrent.futures
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Union, Tuple, Dict
 import logging
 import random
 
@@ -55,26 +55,39 @@ class RAGAgent:
         return (emb_tensor, passages)
     
     
-    def find_gt_passage(self, wiki_data_entity: str, prompt: str):
+    def find_gt_passage(self, wiki_data_entity: Union[str, List[str]], prompt: str) -> List[Tuple[Dict[str, str], float]]:
         # Fetch Wikipedia page details (summary, content, and URL)
-        page = get_exact_page_from_entity(wiki_data_entity)
-        title = page.title
-        summary = page.summary
-        content = page.content
-        url = page.url
-
-        page_text = f"Title: {title}\n{content[:4000]}"
-
-        page_data = {
-            "title": title,
-            "context": page_text,
-        }
+        if isinstance(wiki_data_entity, str):
+            pages = [get_exact_page_from_entity(wiki_data_entity)]
+        else:
+            if len(wiki_data_entity) > 3 or len(wiki_data_entity) == 0:
+                raise RuntimeError(f"find_gt_passage: received {len(wiki_data_entity)} entities, ",
+                                   "I haven't thought about how to handle that")  
+            pages = [get_exact_page_from_entity(entity) for entity in wiki_data_entity]
         
-        # Step 5: Embed and compute similarity
-        page_embedding = self.embedding_adapter.encode(page_text)
-        prompt_embedding = self.embedding_adapter.encode(prompt)
-        sim_score = similarity(page_embedding, prompt_embedding)
-        return [(page_data, sim_score)]
+        gt_passages = [] 
+        for page in pages:
+            pages = get_exact_page_from_entity(wiki_data_entity)
+            title = page.title
+            summary = page.summary
+            content = page.content
+            url = page.url
+
+            page_text = f"Title: {title}\n{content[:4000]}"
+
+            page_data = {
+                "title": title,
+                "context": page_text,
+            }
+            
+            # Step 5: Embed and compute similarity
+            page_embedding = self.embedding_adapter.encode(page_text)
+            prompt_embedding = self.embedding_adapter.encode(prompt)
+            sim_score = similarity(page_embedding, prompt_embedding)
+            
+            gt_passages.append((page_data, sim_score))
+        
+        return gt_passages
     
     
     def find_topk_relevant_pages(self, wiki_data, prompt, top_k=3) -> List[Tuple[str, float]]:

@@ -8,15 +8,16 @@ import torch
 import wikipedia
 
 from collections import deque
-from typing import List
+from typing import List, Union
 import random
 import time
 import logging
 
 from utils.wiki_helper import WikiHelper, get_exact_page_from_entity
 class RootNode:
-    def __init__(self, title: str):
-        self.title = title
+    def __init__(self, titles: List[str]):
+        # a tree can have 1..n roots entities
+        self.title = ", ".join(titles)
         self.children = []
         self.visited = set() # set of entities
         
@@ -103,8 +104,8 @@ class KnowledgeGraph:
             if not line:
                 continue
             for sent in sent_tokenize(line):
-                # 2) Discard any sentence shorter than 5 characters
-                if len(sent) >= 5:
+                # 2) Discard any sentence shorter than 5 words
+                if len(sent.split()) >= 5:
                     sentences.append(sent)
         vectorizer = TfidfVectorizer()
         # Compute TF-IDF matrix
@@ -124,35 +125,40 @@ class KnowledgeGraph:
         return sentences[:top_k_ret]
 
 
-    def create_graph(self, start_entity: str, k_hop: int, top_k: int):
+    def create_graph(self, start_entity: Union[str, List[str]], k_hop: int, top_k: int):
         '''
         Create a graph/tree using BFS from the start_entity using Wikipedia links.
         '''
         start_time = time.time()
-        
+
+        # Ensure start_entity is a list of strings
+        if isinstance(start_entity, str):
+            start_entity = [start_entity]
+
         # 1. Initialize root node with the start entity
         root = RootNode(start_entity)
-        root.visited = {start_entity}
+        root.visited = set(start_entity)
         queue = deque()
         
-        # 2. Fetch the Wikipedia page for the start entity
-        wiki_page = get_exact_page_from_entity(start_entity)
-        
-        node = PageNode(wiki_page.title,
-                        wiki_page.summary,
-                        wiki_page.content,
-                        wiki_page.url)
-        node.document_list = self.get_k_documents(node.content)
-        root.add_child(node)
-        root.visited.add(wiki_page.title)
-        page_dict = {
-            "title":wiki_page.title,
-            "summary":wiki_page.summary,
-            "content":wiki_page.content,
-            "url":wiki_page.url,
-            'links': wiki_page.links,
-            }
-        queue.append((node, page_dict))
+        # 2. Fetch the Wikipedia page for the start entities
+        for start_ent in start_entity:   
+            wiki_page = get_exact_page_from_entity(start_ent)
+            
+            node = PageNode(wiki_page.title,
+                            wiki_page.summary,
+                            wiki_page.content,
+                            wiki_page.url)
+            node.document_list = self.get_k_documents(node.content)
+            root.add_child(node)
+            root.visited.add(wiki_page.title)
+            page_dict = {
+                "title":wiki_page.title,
+                "summary":wiki_page.summary,
+                "content":wiki_page.content,
+                "url":wiki_page.url,
+                'links': wiki_page.links,
+                }
+            queue.append((node, page_dict))
         
         # 3. BFS expansion
         for i in range(k_hop):
@@ -176,9 +182,9 @@ class KnowledgeGraph:
                             logging.error("create_graph: Exception weights", e)
                 
                 # Sort valid_links based on weights and select the top_k links.
-                sorted_indices = sorted(range(len(link_weights)), key=lambda i: link_weights[i])
-                top_indices = sorted_indices[:min(len(valid_links), top_k)]  # Use valid_links length here.
-                top_links = [valid_links[i] for i in top_indices]
+                sorted_indices = sorted(range(len(link_weights)), key=lambda i: link_weights[i], reverse=True)
+                top_indices = sorted_indices[:min(len(valid_links), top_k)]  # Use valid_links length here
+                top_links = [valid_links[i] for i in top_indices] # Use valid_links length here
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     futures = {executor.submit(self.wiki_helper.fetch_wiki_page_with_retry, link): link for link in top_links}
                     for future in concurrent.futures.as_completed(futures):

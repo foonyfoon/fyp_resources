@@ -328,30 +328,33 @@ class PrefixPerturber(SemanticPerturber):
             )
         
         print("prompt_list: ", prompt_list)
+        
         # 2. calculate scores
         sim_scores = scores([p["new_prompt"] for p in prompt_list])
-           
-        for  prompt in prompt_list:
+        
+        # 3. find best prefix
+        for prompt_list_idx, prompt in enumerate(prompt_list):
             candidate_prefix = prompt["candidate_prefix"]
             new_prompt = prompt["new_prompt"]
-            idx = prompt["idx"]
-            new_score = sim_scores[idx]
+            new_score = sim_scores[prompt_list_idx]
+            doc_list_idx = prompt["idx"]
 
             delta = new_score - current_score # new score is smaller if delta is negative
             p_accept = min(1, math.exp(delta / T))
             if random.random() <= p_accept:
                 current_prefix, current_prompt, current_score = candidate_prefix , new_prompt, new_score
-                best_prefix, best_score, best_idx = current_prefix, current_score, idx
+                best_prefix, best_score, best_idx = current_prefix, current_score, doc_list_idx
             T *= T_decay
 
         if not best_prefix.strip() and last_candidate:
             best_prefix, best_idx = last_candidate, last_idx
-            
+
+        # fallback
         if best_idx == -1 and prompt_list:
             random_prompt = random.choice(prompt_list)
             best_prefix, best_idx = random_prompt["candidate_prefix"], random_prompt["idx"]
         elif best_idx == -1:
-            _, _, _, best_idx = self.knowledge_graph.get_next_document()  # Final fallback
+            _, _, _, best_idx = self.knowledge_graph.get_next_document()  
 
         self.knowledge_graph.update_visit_status(best_idx)
         
