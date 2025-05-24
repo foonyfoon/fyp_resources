@@ -151,3 +151,53 @@ class SyntacticNode(Node):
             "wiki_title": self.wiki_title
             
         }
+  
+        
+class TerminalNode(Node):
+    def __init__(
+        self,
+        prompt,
+        semantic_similarity_score,
+        root_similarity_score,
+        embedding,
+        rag_closest_match,
+        rag_entities,
+        ner_entities,
+        wiki_title,
+        parent=None,
+        complexity_score=0,
+        fk_score=0,
+        dc_score=0,
+        
+    ):
+        super().__init__("terminal", prompt, parent)
+        self.semantic_similarity_score = semantic_similarity_score
+        self.root_similarity_score = root_similarity_score
+        self.embedding = embedding
+        self.rag_closest_match = rag_closest_match
+        self.rag_entities = rag_entities
+        self.ner_entities = ner_entities
+        self.complexity_score = complexity_score
+        self.fk_score = fk_score
+        self.dc_score = dc_score
+        self.wiki_title = wiki_title
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "type": self.type,
+            "prompt": self.prompt,
+            "parent": self.parent.id if self.parent else None,
+            "children": [child.to_dict() for child in self.children],
+            "rag_closest_match": self.rag_closest_match,
+            "rag_entities": self.rag_entities,
+            "ner_entities": self.ner_entities,
+            "answers": self.answers,
+            "root_similarity_score": self.root_similarity_score,
+            "semantic_similarity_score": self.semantic_similarity_score,
+            "threshold": self.threshold,
+            "complexity_score": self.complexity_score,
+            "fk_score": self.fk_score,
+            "dc_score": self.dc_score,
+            "wiki_title": self.wiki_title
+        }

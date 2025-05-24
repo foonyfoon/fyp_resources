@@ -27,14 +27,14 @@ import utils.constants as constants
 
 # ####################### DEFAULT #######################
 # prefix, paraphrase, paraphrase_then_prefix
-strategy = "paraphrase"
+strategy = "prefix"
 # google/gemma-3-12b-it mistral.mistral-7b-instruct-v0:2
 gen_modelIds = constants.MODELS
 eval_only = False
 # #######################################################
 statrgy_path = constants.STRATEGY_PATH_DICT[strategy]
-intermediatory_tree_dir = f"{constants.TREE_DIR}POPQA_treenodes/{statrgy_path}/gemma3-12b_perturb/3_2_0/tree"
-checked_tree_dir = f"{constants.TREE_DIR}POPQA_treenodes/{statrgy_path}/gemma3-12b_perturb/3_2_0/"
+intermediatory_tree_dir = f"{constants.TREE_DIR}long_TQA_treenodes/{statrgy_path}/gemma3-12b_perturb/3_2_0/tree"
+checked_tree_dir = f"{constants.TREE_DIR}long_TQA_treenodes/{statrgy_path}/gemma3-12b_perturb/3_2_0/"
 timer_path = f"{constants.TIMER_DIR}gemma3-12b-with-caching-{statrgy_path}.pkl"
 DLQ = []  # Dead Letter Queue
 
@@ -227,8 +227,8 @@ def parse_args():
 def update_params(dataset_name: str):
     global statrgy_path, intermediatory_tree_dir, checked_tree_dir, timer_path
     statrgy_path = constants.STRATEGY_PATH_DICT[strategy]
-    intermediatory_tree_dir = f"{constants.TREE_DIR}{dataset_name}_treenodes/{statrgy_path}/gemma3-12b_perturb/3_2_0/tree"
-    checked_tree_dir = f"{constants.TREE_DIR}{dataset_name}_treenodes/{statrgy_path}/gemma3-12b_perturb/3_2_0/"
+    intermediatory_tree_dir = f"{constants.TREE_DIR}long_{dataset_name}_treenodes/{statrgy_path}/gemma3-12b_perturb/3_2_0/tree"
+    checked_tree_dir = f"{constants.TREE_DIR}long_{dataset_name}_treenodes/{statrgy_path}/gemma3-12b_perturb/3_2_0/"
     timer_path = f"{constants.TIMER_DIR}gemma3-12b-with-caching-{statrgy_path}.pkl"
 
 
@@ -293,7 +293,7 @@ def main():
         params = {
             "modelId": "google/gemma-3-12b-it",
             "embedder": embedder,
-            "tree_size": constants.TREE_SIZE
+            "tree_size": (10, 1, 0)
         }
         with select_perturber(strategy, params) as semantic_adapter:
             for index, row in df.iloc[start_idx : end_idx + 1].iterrows():
@@ -306,7 +306,7 @@ def main():
                             syntactic_adapter,
                             None,
                             embedder,
-                            constants.TREE_SIZE,
+                            (10, 1, 0),
                         )
                 except Exception or RuntimeError as err:
                     if error_questions < constants.ERROR_THRESHOLD:
@@ -383,6 +383,6 @@ def main():
     )
 
 
-# example: prefic-3_2_0 10 150 --strategy=prefix --eval_only --gen_modelId=google/gemma-3-1b-it
+# example: prefix-3_2_0 10 150 --strategy=prefix --eval_only --gen_modelId=google/gemma-3-1b-it
 if __name__ == "__main__":
     main()

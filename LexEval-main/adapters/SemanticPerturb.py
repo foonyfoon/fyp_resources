@@ -5,8 +5,8 @@ import pickle
 import random
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field, replace
-from typing import Any, Dict, List
+from dataclasses import replace
+from typing import List
 
 import numpy as np
 import spacy
@@ -14,9 +14,11 @@ import torch
 
 from adapters.OAI_Embeddings import EmbedAdapter
 from adapters.WikiKnowledgeGraph import KnowledgeGraph
+from adapters.coref_resolve import CorefResolution
 from model.engine import LLMAdapter
 from similarity.cosine_similarity import similarity, similarities
-
+import utils.constants as constants
+from adapters.prompt_package import PromptPackage
 # ---------------------------------------------------------------------------
 # Generic helpers
 # ---------------------------------------------------------------------------
@@ -35,18 +37,6 @@ def clear_cache() -> None:
     logging.info("after clearing cache, %s/%s memory available", free_mem, total_mem)
 
 # ---------------------------------------------------------------------------
-# Core data container
-# ---------------------------------------------------------------------------
-
-@dataclass
-# constructed per node basis
-class PromptPackage:
-    """Carries the evolving prompt plus arbitrary metadata/state."""
-
-    text: str
-    state: Dict[str, Any] = field(default_factory=dict)
-
-# ---------------------------------------------------------------------------
 # Abstract base perturber
 # ---------------------------------------------------------------------------
 
@@ -60,7 +50,7 @@ class SemanticPerturber(ABC):
         self.release()
 
     @abstractmethod
-    def setup_for_tree(self, pkg: PromptPackage) -> None:  
+    def setup_perturber(self, pkg: PromptPackage) -> None:  
         """Prepare any expensive index/graph before perturbations start."""
 
     @abstractmethod
@@ -83,9 +73,9 @@ class CombinedPerturber(SemanticPerturber):
     def __init__(self, perturbations: List[SemanticPerturber]):
         self.perturbers = perturbations
 
-    def setup_for_tree(self, prompt: str, root_entity: str): 
+    def setup_perturber(self, prompt: str, root_entity: str): 
         for p in self.perturbers:
-            p.setup_for_tree(prompt, root_entity)
+            p.setup_perturber(prompt, root_entity)
 
     def sem_perturb(self, pkg: PromptPackage, **kwargs) -> PromptPackage:
         # temporary logic accounting for para->prefix combo 
@@ -117,7 +107,7 @@ class ParaphrasePerturber(SemanticPerturber):
         self.prompt_history: list[str] = []  # dedup queue
 
 
-    def setup_for_tree(self, prompt: str, root_entity: str): 
+    def setup_perturber(self, prompt: str, root_entity: str): 
         # treat the initial root prompt as already used
         if prompt not in self.prompt_history:
             self.prompt_history.append(prompt)
@@ -133,7 +123,20 @@ class ParaphrasePerturber(SemanticPerturber):
         lower_thresh: float = 0.849,
         **kwargs,
     ) -> PromptPackage:
-        """Paraphrase until cosine similarity is within the desired band."""
+        """
+        Paraphrase until cosine similarity is within the desired band.
+
+        Constructs a new PromptPackage by modifying the base prompt with a semantically 
+        perturbed version that remains similar to the root prompt.
+
+        The state dictionary is updated with:
+        - "base_prompt": The selected paraphrased candidate.
+        - "similarity": Cosine similarity between the root and paraphrased prompt.
+        - "is_valid": True if the candidate is sufficiently different and not a duplicate.
+
+        Returns:
+            PromptPackage: A new instance containing the perturbed prompt and updated state.
+        """
         retry = 0
         is_valid = False
         root_prompt = pkg.state.get("root_prompt", pkg.text)
@@ -174,7 +177,8 @@ class ParaphrasePerturber(SemanticPerturber):
             is_unique = candidate not in self.prompt_history
             within_bounds = lower_thresh <= sim <= upper_thresh
             is_valid = is_unique and within_bounds
-    
+
+            # Construct new state and package with the accepted paraphrased prompt
             if is_valid:
                 new_state = {
                     **pkg.state,
@@ -182,7 +186,7 @@ class ParaphrasePerturber(SemanticPerturber):
                     "similarity": sim,
                     "is_valid": True,
                 }
-                # Construct and return a new PromptPackage (no in-place mutation)  
+                
                 new_pkg = replace(
                     pkg,
                     text=candidate,
@@ -237,20 +241,23 @@ class ParaphrasePerturber(SemanticPerturber):
 # ---------------------------------------------------------------------------
 
 class PrefixPerturber(SemanticPerturber):
+
     def __init__(self, embedder: EmbedAdapter, tree_size: tuple[int, int]):
         self.embedder = embedder
         self.k_hop = tree_size[0] 
         self.top_k = tree_size[1]
         self.NER = spacy.load("en_core_web_trf")
 
-        # will be initialised in `setup_for_tree`
+        # will be initialised in `setup_setup_perturber`
         self.knowledge_graph: KnowledgeGraph | None = None
         self.root_embeddings: list[np.ndarray] | None = None
+        self.cr = CorefResolution()
 
-    def setup_for_tree(self, prompt: str, root_entity: str): 
+    def setup_perturber(self, prompt: str, root_entity: str): 
         # create new knowledge graph instance
         self.knowledge_graph = KnowledgeGraph(
             root_entity, #wiki title
+            self.cr,
             k_hop=self.k_hop,
             top_k=self.top_k,
             prompt=prompt,
@@ -269,33 +276,54 @@ class PrefixPerturber(SemanticPerturber):
         T_decay: float = 0.8,
         **kwargs,
     ) -> PromptPackage:
+        """
+        Performs semantic perturbation by prepending a relevant knowledge-based prefix.
+
+        Uses knowledge graph documents to select the best context prefix via simulated 
+        annealing and cosine similarity scoring.
+
+        Constructs a new state dictionary with:
+        - "base_prompt": Retains the original prompt unless overwritten.
+        - "prefix_similarity": Negative cosine similarity to prioritize semantic distance.
+        - "prefix_text": Appended prefix text from the selected knowledge graph node.
+        - "is_valid": Inherited from the previous state (default: True).
+
+        Returns:
+            PromptPackage: A new instance containing the prefix-augmented prompt and updated state.
+        """
         if not pkg.text:
             return pkg
 
-        def score(prompt: str) -> float:
+        def similarity_score(prompt: str) -> float:
             emb = self.embedder.encode(prompt)
             sims = [similarity(r, emb) for r in self.root_embeddings]
-            return -np.mean(sims)  # lower similarity => higher score
+            return np.mean(sims)
     
-        def scores(prompts: List[str]) -> List[float]:
+        def similarity_scores(prompts: List[str]) -> List[float]:
             # TODO: kinda sus?? fix this
+            print(f"len(prompts): {len(prompts)}")
             embs = self.embedder.encode(prompts).to("cuda")  # move embeddings to GPU
             root_emb_tensor = torch.stack([t.to("cuda") for t in self.root_embeddings]).float()
+            print(f"root_emb_tensor.shape: {root_emb_tensor.shape}")
+            print(f"embs.shape: {embs.shape}")
             sims = similarities(embs, root_emb_tensor) # can be shape (m, n, 1) / or (n, 1)
             print("scores: sims.shape", sims.shape)
             if sims.dim() == 2:  # e.g., shape (n, 1)
-                return sims.squeeze(-1).tolist()  # flatten if needed
+                ret = sims.squeeze(-1).tolist()  # flatten if needed
 
             else:  # shape (m, n, 1)
                 sims = sims.squeeze(-1)  # shape (m, n)
-                return (-sims.mean(dim=1)).tolist()  # mean over root embeddings
+                ret = (sims.mean(dim=0)).tolist()  # mean over root embeddings
+                
+            print(f"ret: {type(ret)} {ret}")
+            return ret
         
 
         node_visited: set[str] = set()
         base_prompt = pkg.text
         current_prefix = ""
         current_prompt = f"{base_prompt}".strip()
-        current_score = score(current_prompt)
+        current_score = similarity_score(current_prompt)
         best_prefix = current_prefix
         best_score = current_score
         best_idx = -1
@@ -330,8 +358,9 @@ class PrefixPerturber(SemanticPerturber):
         print("prompt_list: ", prompt_list)
         
         # 2. calculate scores
-        sim_scores = scores([p["new_prompt"] for p in prompt_list])
+        sim_scores = similarity_scores([p["new_prompt"] for p in prompt_list])
         
+        print(sim_scores)
         # 3. find best prefix
         for prompt_list_idx, prompt in enumerate(prompt_list):
             candidate_prefix = prompt["candidate_prefix"]
@@ -339,7 +368,7 @@ class PrefixPerturber(SemanticPerturber):
             new_score = sim_scores[prompt_list_idx]
             doc_list_idx = prompt["idx"]
 
-            delta = new_score - current_score # new score is smaller if delta is negative
+            delta = current_score - new_score # always accept where new score < current score(less similar)
             p_accept = min(1, math.exp(delta / T))
             if random.random() <= p_accept:
                 current_prefix, current_prompt, current_score = candidate_prefix , new_prompt, new_score
@@ -357,6 +386,8 @@ class PrefixPerturber(SemanticPerturber):
             _, _, _, best_idx = self.knowledge_graph.get_next_document()  
 
         self.knowledge_graph.update_visit_status(best_idx)
+        
+        # Build new state and construct updated PromptPackage with best prefix
         
         new_state = {
             **pkg.state,
@@ -378,12 +409,6 @@ class PrefixPerturber(SemanticPerturber):
     def post_process(self):
         if not self.knowledge_graph:
             return
-        title = getattr(self.knowledge_graph.graph, "title", "kg")
-        out_dir = "/vol/bitbucket/lst20/graph"
-
-        with open(os.path.join(out_dir, f"{title}_kg.pkl"), "wb") as f:
-            pickle.dump(self.knowledge_graph, f)
-
         # nothing else to keep
         del self.knowledge_graph, self.root_embeddings
         self.knowledge_graph, self.root_embeddings = None, None
@@ -395,4 +420,7 @@ class PrefixPerturber(SemanticPerturber):
         if self.root_embeddings is not None:
             del self.root_embeddings
             self.root_embeddings = None
+        if self.cr is not None:
+            self.cr.cleanup()
+            del self.cr
         clear_cache()

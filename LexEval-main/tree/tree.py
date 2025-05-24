@@ -17,10 +17,11 @@ from rouge_score import rouge_scorer
 from nltk.translate.bleu_score import corpus_bleu
 
 from adapters.SemanticAdapter import SemanticAdapter
-from adapters.SemanticPerturb import PromptPackage, SemanticPerturber
+from adapters.SemanticPerturb import SemanticPerturber
 from adapters.OAI_Embeddings import EmbedAdapter
 from similarity.cosine_similarity import similarity
 from utils.timer import Timers
+from adapters.prompt_package import PromptPackage
 from adapters.rag import RAGAgent
 from tree.node import RootNode, SyntacticNode, SemanticNode
 
@@ -131,12 +132,12 @@ class Tree(AbstractTree):
             - prev_state (Optional[dict]): Previous tree state for resuming/continuing (optional).
         """
         # answer model
-        is_eval = kwargs.get("eval", False)
-        if is_eval:
+        stage = kwargs.get("eval", "sem")
+        if stage == "eval" or (isinstance(stage, bool) and stage):
             self.generator = kwargs.get("generator")
             self.rag = RAGAgent(eval=True, generator=self.generator)
             self.base = SemanticAdapter(self.generator)
-        else:
+        elif stage == "sem":
             self.rag = RAGAgent(
                 eval=False,
                 ner_model=kwargs.get("ner_model"),
@@ -145,31 +146,32 @@ class Tree(AbstractTree):
             # preturb model
             self.sem_perturber: SemanticPerturber = kwargs.get("sem_perturber")
             s_wiki_title = kwargs.get("s_wiki_title")
-            self.sem_perturber.setup_for_tree(root_prompt, s_wiki_title)
+            if self.sem_perturber:
+                self.sem_perturber.setup_perturber(root_prompt, s_wiki_title)
             self.syn_perturber = kwargs.get("syn_perturber")
-
-        self.embed_model: EmbedAdapter = kwargs.get("embedder")
+            self.embed_model: EmbedAdapter = kwargs.get("embedder")
+            self.root.embedding = self.embed_model.encode(root_prompt)
+            
         self.root_prompt = root_prompt
         self.num_semantic = 0
         self.num_syntactic = 0
 
         prev_state = kwargs.get("prev_state", None)
         self.root = RootNode(root_prompt) if prev_state is None else prev_state["root"]
-        self.root.embedding = self.embed_model.encode(root_prompt)
 
-        if is_eval and prev_state is not None:
+        if prev_state is not None:
             self.rag_entities = prev_state.get("rag_entities")
             self.ner_entities = prev_state.get("ner_entities")
             self.gt_passage = prev_state.get("gt_passage")
             self.root.rag_closest_match = prev_state.get("rag_closest_match")
             self.gt_passage = prev_state.get("gt_passage")
             self.root.wiki_title = prev_state.get("wiki_title")
-        elif not is_eval:
+        elif stage == "sem":
             # Otherwise, run retriever pipeline
             # root
             wiki_data = self.rag.retrieve_wiki_data_2(root_prompt)
             self.gt_passage = self.rag.find_gt_passage(s_wiki_title, root_prompt)
-            closest_match = self.construct_retrieved_evidence(0, wiki_data, root_prompt)
+            closest_match = self.construct_retrieved_evidence(0, wiki_data, root_prompt, correct_docs=len(self.gt_passage))
             self.rag_entities = self.rag.search_entities_2(prompt=root_prompt)
             self.ner_entities = self.rag.search_entities_NER(prompt=root_prompt)
             self.root.rag_closest_match = closest_match
@@ -267,7 +269,7 @@ class Tree(AbstractTree):
             butterfinger=self.syn_perturber.butterfinger,
         )
         wiki_data = self.rag.retrieve_wiki_data_2(syn_perturb)
-        closest_match = self.construct_retrieved_evidence(0, wiki_data, syn_perturb)
+        closest_match = self.construct_retrieved_evidence(0, wiki_data, syn_perturb, correct_docs=len(self.gt_passage))
         rag_entities = self.rag.search_entities_2(prompt=syn_perturb)
         ner_entities = self.rag.search_entities_NER(prompt=syn_perturb)
         rag_closest_match = closest_match
@@ -282,7 +284,7 @@ class Tree(AbstractTree):
             wiki_title=[w["title"] for w in wiki_data],
         )
         return syntactic_node
-
+        
     def generate_semantic_node(
         self, root_prompt, parent_node: SemanticNode, upper_thresh, lower_thresh, index
     ) -> Tuple[SemanticNode, bool]:
@@ -332,7 +334,7 @@ class Tree(AbstractTree):
             # new: introducing extraneous wiki passage post retrieval from retrieval
             Timers.start(index, "create tree", "construct_retrieved_evidence")
             closest_match = self.construct_retrieved_evidence(
-                index, wiki_data, perturbation
+                index, wiki_data, perturbation, correct_docs=len(self.gt_passage)
             )
             Timers.end(index, "create tree", "construct_retrieved_evidence")
 
@@ -550,17 +552,24 @@ class Tree(AbstractTree):
         return accuracy, f1_score
 
     def process_node(self, node, model_name):
-        # This method contains the code to process a single node.
-        response = self.base.sem_check(node.prompt, model_name)
-        base_rag_response = "No answer"
-        if node.rag_closest_match is not None:
-            base_rag_response = self.rag.answer_using_wiki_2(
-                model_name, node.prompt, node.rag_closest_match
-            )
-        node.answers[model_name] = {}
-        node.answers[model_name]["base"] = response
-        node.answers[model_name]["base_rag"] = base_rag_response
-
+        # call sem check if response is not in node
+        if not node.answers or model_name not in node.answers:
+            # base
+            response = self.base.sem_check(node.prompt, model_name)
+            base_rag_response = "No answer"
+            # rag
+            if node.rag_closest_match is not None:
+                base_rag_response = self.rag.answer_using_wiki_2(
+                    model_name, node.prompt, node.rag_closest_match
+                )
+            node.answers[model_name] = {}
+            node.answers[model_name]["base"] = response
+            node.answers[model_name]["base_rag"] = base_rag_response
+        else:
+            print(f"answer for {node.__class__.__name__} already exists")
+            response = node.answers[model_name]["base"]
+            base_rag_response = node.answers[model_name]["base_rag"]
+            
         true_positives = 0
         false_positives = 0
         false_negatives = 0
@@ -572,6 +581,17 @@ class Tree(AbstractTree):
         found_match = False
         rag_found_match = False
 
+        # TODO: fix dataset wrong format of possible answer column
+        if isinstance(self.possible_answers, str):
+            try:
+                parsed = json.loads(self.possible_answers)
+                if not isinstance(parsed, list):
+                    self.possible_answers = json.dumps([self.possible_answers])
+            except json.JSONDecodeError:
+                self.possible_answers = json.dumps([self.possible_answers])
+        elif isinstance(self.possible_answers, list):
+            self.possible_answers = json.dumps(self.possible_answers)
+               
         for expected_answer in json.loads(self.possible_answers):
             if response.__contains__(expected_answer):
                 found_match = True
@@ -643,7 +663,6 @@ class Tree(AbstractTree):
             batch = [queue.popleft() for _ in range(min(batch_size, len(queue)))]
             for node in batch:
                 # Process the node sequentially
-
                 Timers.start(index, model_name, "sem_check")
                 answers, node_metrics = self.process_node(node, model_name)
                 Timers.end(index, model_name, "sem_check")
@@ -675,7 +694,10 @@ class Tree(AbstractTree):
         }
 
         self.metrics[model_name] = answer
-        self.time_check[model_name] = end_time - start_time
+        
+        # update processing time
+        elapsed_time = end_time - start_time
+        self.time_check[model_name] = self.time_check.get(model_name, 0) + elapsed_time
         end_time = time.time()
         print("Time to run check: ", end_time - start_time)
 

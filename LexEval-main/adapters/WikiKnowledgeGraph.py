@@ -73,9 +73,10 @@ class KnowledgeGraph:
     '''
     each knowledge graph is created per root prompt and stored there
     '''
-    def __init__(self, entity: str, **kwargs):
+    def __init__(self, entity: str, cr_model, **kwargs):
         prompt: str = kwargs.get("prompt")
         k_hop, top_k = 2, 3
+        self.cr = cr_model
         self.embedder = kwargs.get("embedder")
         self.wiki_helper = WikiHelper(self.embedder)
         self.graph = self.create_graph(entity, k_hop, top_k)
@@ -116,11 +117,17 @@ class KnowledgeGraph:
         ranked_sentences = [(score, sentence) for score, sentence in sorted(zip(sentence_scores, sentences), reverse=True)]
         
         return ranked_sentences
+        
 
-
-    def get_k_documents(self, corpus: List[str], top_k: int = 50) -> List[str]:
-        # use rank_sentences_by_tfidf to get top_k doc
-        sentences = self.rank_sentences_by_tfidf(corpus)
+    def get_k_documents(self, corpus: str, top_k: int = 50) -> List[str]:
+        """
+        Preprocess corpus: resolve corefs so each sentence has standalone meaning.
+        Then return top_k sentences ranked by TF-IDF relevance.
+        """
+        # Step 1: Coreference resolution
+        resolved_corpus = self.cr.apply_coref_resolution(corpus)
+        # Step 2: Sentence ranking via TF-IDF
+        sentences = self.rank_sentences_by_tfidf(resolved_corpus)
         top_k_ret = min(len(sentences), top_k)
         return sentences[:top_k_ret]
 
