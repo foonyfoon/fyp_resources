@@ -64,7 +64,7 @@ def read_trees_to_df(strategy: str, gen_modelId: str, dataset: str, terminal=Fal
     long_prefix = "long_" if long else ""
     terminal_suffix = 'terminal/' if terminal else ""
     strategy_path = constants.STRATEGY_PATH_DICT[strategy]
-    tree_dir_path = f"/vol/bitbucket/lst20/{long_prefix}{dataset}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{terminal_suffix}"
+    tree_dir_path = f"{constants.TREE_DIR}{long_prefix}{dataset}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{terminal_suffix}"
     if not os.path.isdir(tree_dir_path) or not os.listdir(tree_dir_path):
         return pd.DataFrame()
     rows = []

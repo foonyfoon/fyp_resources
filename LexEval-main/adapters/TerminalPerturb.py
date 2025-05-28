@@ -4,7 +4,6 @@ import logging
 from dataclasses import replace
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Union
-from multivalue import Dialects
 from adapters.prompt_package import PromptPackage
 import nltk
 from nltk.tokenize import sent_tokenize
@@ -42,6 +41,7 @@ class TerminalPerturber(ABC):
             
 class DialectPerturber(TerminalPerturber):
     def __init__(self, dialect: str):
+        from multivalue import Dialects
         # Define perturbation functions
         self.dialect = dialect
         self.prompt_history: list[str] = []  # dedup queue
@@ -68,7 +68,7 @@ class DialectPerturber(TerminalPerturber):
             rules = self.model.executed_rules
             clear_cache()
             # check validity
-            is_valid = candidate not in self.prompt_history and not candidate == og_prompt
+            is_valid = candidate not in self.prompt_history and candidate != og_prompt
             
             if not is_valid:
                 retry += 1
