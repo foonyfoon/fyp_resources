@@ -389,12 +389,14 @@ class PrefixPerturber(SemanticPerturber):
         
         # Build new state and construct updated PromptPackage with best prefix
         
+        prefix_text = f"{pkg.state.get('prefix_text', '')} {best_prefix}".strip()
+        
         new_state = {
             **pkg.state,
             "base_prompt": pkg.state.get("base_prompt", base_prompt),
             "prefix_similarity": best_score,
             "is_valid": pkg.state.get("is_valid", True),
-            "prefix_text": f"{pkg.state.get("prefix_text", "")} {best_prefix}".strip(),
+            "prefix_text": prefix_text,
         }
 
         # Construct and return a new PromptPackage (no in-place mutation)  
