@@ -2,40 +2,89 @@ from typing import Tuple
 from collections import deque
 import textstat
 import os
-import torch
-from datetime import datetime
-import gc
 from tree.tree import Tree
 from tree.node import Node, TerminalNode
 from adapters.SemanticPerturb import PromptPackage
-from adapters.TerminalPerturb import TerminalPerturber, PositionPerturber
+from adapters.TerminalPerturb import TerminalPerturber
 from similarity.cosine_similarity import similarity
 from model.engine import LLMAdapter
 from adapters.OAI_Embeddings import RobertaEmbedder
+import utils.constants as constants
+from itertools import repeat
+import pickle
+import argparse
 
-positions = ["suffix", "middle"]
+'''
+each question, answer tree has new value:
+- is terminal (node)
+- terminal_preturb applied (list of string)
+'''
 
-models = [
-    "mistralai/Mistral-7B-Instruct-v0.2",
-]
+# ########### set ###########
+start_idx = 0
+end_idx = 170
 
-gc.enable()
+# terminal_type = 'sg_dialect'
+# dataset_name = "TQA"
+# stategy_path = "para"
+
+terminal_type = 'position'
+dataset_name = "TQA"
+stategy_path = "para-prefix"
+# ###########################
+missing_tree_path = []
+gen_modelIds = constants.MODELS
+
+def get_term_perturb(term_type: str) -> list:
+    if term_type == "sg_dialect":
+        from adapters.TerminalPerturb import DialectPerturber
+        dialect = "sg"
+        term_perturber = DialectPerturber(dialect)
+        perturbers = [term_perturber]
+
+    elif term_type == "position":
+        from adapters.TerminalPerturb import PositionPerturber
+        positions = ["suffix", "middle"]
+        perturbers = [PositionPerturber(position) for position in positions]
+
+    else:
+        raise ValueError(f"Unknown terminal perturbation type: {term_type}")
+    
+    return perturbers
 
 
-def clear_cache() -> None:
-    """ free CUDA & Python memory."""
-    for obj in gc.get_objects():
-        try:
-            if torch.is_tensor(obj) and obj.is_cuda:
-                del obj
-        except Exception:  # pragma: no cover – best‑effort cleanup
-            pass
-    gc.collect()
-    torch.cuda.empty_cache()
-    free_mem, total_mem = torch.cuda.mem_get_info()
-    print(f"after clearing cache, {free_mem}/{total_mem} memory available")
+def save_tree(file_path, **kwargs):
+    # Make sure the root node is moved to CPU
+    if "root" in kwargs and hasattr(kwargs["root"], "move_to_cpu"):
+        kwargs["root"].move_to_cpu()
 
+    # Prepare node dict from kwargs
+    node = {
+        "root": kwargs["root"],
+        "thresholds": kwargs["thresholds"],
+        "prompt_list": kwargs["prompt_list"],
+        "time_semantic": kwargs["time_semantic"],
+        "time_syntactic": kwargs["time_syntactic"],
+        "time_check": kwargs["time_check"],
+        "metrics": kwargs["metrics"],
+        "root_prompt": kwargs["root_prompt"],
+        "possible_answers": kwargs["possible_answers"],
+        "rag_entities": kwargs["rag_entities"],
+        "ner_entities": kwargs["ner_entities"],
+        "rag_closest_match": kwargs["root"].rag_closest_match,
+        "gt_passage": kwargs["gt_passage"],
+    }
+    print(node)
 
+    # Ensure directory exists
+    dir = os.path.dirname(file_path)
+    if not os.path.exists(dir):
+        os.makedirs(dir)
+
+    # Save to file
+    with open(file_path, "wb") as file:
+        pickle.dump(node, file)
+        
 def generate_terminal_node(
     tree: Tree,
     parent_node: Node,
@@ -60,7 +109,7 @@ def generate_terminal_node(
         perturb_state = perturb_pkg.state
         perturbation = perturb_pkg.text
     except AssertionError as e:
-        print(f"RuntimeError: {e} from prompt {perturb_pkg.text}\n {perturb_pkg.state}")
+        print(f"AssertionError: {e} from prompt {perturb_pkg.text}\n {perturb_pkg.state}")
         is_valid = False
         perturb_state = perturb_pkg.state
         perturbation = perturb_pkg.text
@@ -74,31 +123,30 @@ def generate_terminal_node(
         rag_closest_match = parent_node.rag_closest_match
         rag_entities = parent_node.rag_entities
         ner_entities = parent_node.ner_entities
-
+        
         wiki_title = parent_node.wiki_title
         fk_score = textstat.flesch_kincaid_grade(perturbation)
         dc_score = textstat.dale_chall_readability_score(perturbation)
         complexity_score = (fk_score + dc_score) / 2
         term_node = TerminalNode(
-            perturbation,
-            sem_sim,
-            root_sim,
-            tree.embed_model.encode(perturbation),
-            rag_closest_match,
-            rag_entities,
-            ner_entities,
-            wiki_title=wiki_title,
-            parent=parent_node,
-            fk_score=fk_score,
-            dc_score=dc_score,
-            complexity_score=complexity_score,
-        )
+                    perturbation,
+                    sem_sim,
+                    root_sim,
+                    tree.embed_model.encode(perturbation),
+                    rag_closest_match,
+                    rag_entities,
+                    ner_entities,
+                    wiki_title=wiki_title,
+                    parent=parent_node,
+                    fk_score=fk_score,
+                    dc_score=dc_score,
+                    complexity_score=complexity_score,
+                )
         term_node.metadata.update(perturb_state)
         print(term_node.metadata)
     else:
         term_node = None
     return (term_node, is_valid)
-
 
 def apply_terminal_preturb(term_perturber: TerminalPerturber, tree: Tree):
     type_name = term_perturber.name
@@ -128,128 +176,181 @@ def apply_terminal_preturb(term_perturber: TerminalPerturber, tree: Tree):
                 node.metadata["terminal_applied"] = type_names
 
                 # Set the metadata for the terminal node
-                term.metadata = {**term.metadata, "level": curr_level}
+                term.metadata = {
+                    **term.metadata,
+                    "level": curr_level
+                }
             # Add children of the current node to the queue
             for child in node.children:
                 queue.append((child, curr_level + 1))
-
-            if is_valid:  # Append the terminal node as a child
+            
+            if is_valid: # Append the terminal node as a child
                 node.add_child(term)
-
 
 def process_tree(tree: Tree, tree_idx, model_name):
     tree.run_check_pop_qa_batched(tree_idx, model_name)
-
 
 def get_generator(modelId: str) -> LLMAdapter:
     model: LLMAdapter = None
     if "gemma-3" in modelId.lower():
         from model.engine import Gemma3Adapter
-
         model = Gemma3Adapter(modelId)
     elif "gemma" in modelId.lower():
         from model.engine import GemmaAdapter
-
         model = GemmaAdapter(modelId)
     elif "mistralai" in modelId.lower():
         from model.engine import MistralInstructAdapter
         model = MistralInstructAdapter(modelId)
-        
     elif "mistral.mistral-7b-instruct-v0:2" in modelId.lower():
         from model.engine import MistralInstructAwsAdapter
-
         model = MistralInstructAwsAdapter(modelId)
     else:
         raise NotImplementedError(f"No adapter implemented for: {modelId}")
     return model
 
+def clone_terminal_nodes(target, candidates) -> bool:
+    def bfs_clone_terminal_nodes(t_root, c_root) -> bool:
+        queue = deque([(t_root, c_root)])
+        
+        while queue:
+            t_node, c_node = queue.popleft()
+            # Get terminal names from metadata (default to empty list if not found)
+            c_node_terminals = c_node.metadata.get('terminal_applied', [])
+            t_node_terminals = t_node.metadata.get('terminal_applied', [])
+            print(c_node.id, c_node_terminals, t_node_terminals)
+            # Convert to sets for intersection
+            missing_terminals = set(t_node_terminals) - set(c_node_terminals)
 
-def main(partition):
-    ############ setup ############
-    embedder = RobertaEmbedder()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # prepare list of inter_path files
-    tree_ids = []
-    inter_dir = "/vol/bitbucket/lst20/long_POPQA_treenodes/prefix/gemma3-12b_perturb/3_2_0/tree/"
-    file_ext = ".pkl"
-    for filename in os.listdir(inter_dir):
-        if filename.endswith(file_ext):
-            tree_ids.append(int(filename[: -len(file_ext)]))
-    preturbers = [PositionPerturber(position) for position in positions]
+            # Get terminal children of t_node that match the common terminal names
+            terminal_children = [
+                child for child in t_node.children
+                if isinstance(child, TerminalNode) and child.metadata.get('terminal_name') in missing_terminals
+            ]
+            # Traverse non-terminal children
+            t_non_term_children = [
+                child for child in t_node.children
+                if not isinstance(child, TerminalNode)
+            ]
+            c_non_term_children = [
+                child for child in c_node.children
+                if not isinstance(child, TerminalNode)
+            ]
+            # update children and self
+            c_node.children.extend(terminal_children)
+            c_node.metadata.setdefault('terminal_applied', []).extend(missing_terminals)
+
+            for t_child, c_child in zip(t_non_term_children, c_non_term_children):
+                queue.append((t_child, c_child))
+
+        return True
+
     
-    if partition == 0:
-        tree_ids = [tree_id for tree_id in tree_ids if tree_id <= 7398]
-    else:
-        tree_ids = [tree_id for tree_id in tree_ids if tree_id > 7398]
-    ############ setup ############
-
-    # for tree_id in tree_ids:
-    #     inter_path = f"{inter_dir}{tree_id}{file_ext}"
-    #     try:
-    #         inter_tree = Tree.load_tree(
-    #             device, inter_path, embedder=embedder, eval="term"
-    #         )
-    #     except FileNotFoundError:
-    #         continue
-    #     # update inter-tree
-    #     print(f"processing tree_id {tree_id}")
+    for t_tree, c_tree in zip(repeat(target, len(candidates)), candidates):
+        t_root = t_tree.root
+        c_root = c_tree.root
+        print('=====================================')
+        if not bfs_clone_terminal_nodes(t_root, c_root):
+            return False
+    return True
+  
+def process_dialect():
+    perturbers = get_term_perturb(terminal_type)
+    embedder = RobertaEmbedder()
+    tree_ids = []
+    inter_dir = f'{constants.TREE_DIR}{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/tree/'
+    for filename in os.listdir(inter_dir):
+        if filename.endswith('.pkl'):
+            tree_ids.append(int(filename[: -len('.pkl')]))
+    tree_ids = tree_ids[start_idx:end_idx]
+    print(tree_ids)
+    
+    # perturb
+    print("****  start dialect perturb  ****")
+    
+    for tree_id in tree_ids:
+        print(f"perturb tree q_id={tree_id}")
+        inter_path = f"{inter_dir}{tree_id}.pkl"
+        try:
+            inter_tree = Tree.load_tree(embedder.model.device, inter_path, eval="terminal", embedder=embedder)
+        except FileNotFoundError as e:
+            print(e)
+            continue
+        for perturber in perturbers:
+            apply_terminal_preturb(perturber, inter_tree)
+        inter_tree.save_tree(inter_path)
+        # replicate to checked trees
+        target_tree = Tree.load_tree(embedder.model.device, inter_path, embedder=embedder, eval="terminal")
+        candidate_trees = []
+        candidate_paths = []
+        for gen_modelId in gen_modelIds:
+            final_path = f"{constants.TREE_DIR}{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
+            try:
+                cand_tree = Tree.load_tree(embedder.model.device, final_path, embedder=embedder, eval="terminal")
+            except FileNotFoundError as e:
+                missing_tree_path.append(final_path)
+                print(e)
+                continue
+            candidate_trees.append(cand_tree)
+            candidate_paths.append(final_path)
         
-    #     for term_perturber in preturbers:
-    #         apply_terminal_preturb(term_perturber, inter_tree)
-            
-    #     inter_tree.save_tree(inter_path)
+        if candidate_trees:
+          clone_terminal_nodes(target_tree, candidate_trees)
         
-    #     # BFS walk to replicate term nodes across tree for updating any checked trees
-    #     for m in models:
-    #         checked_path = f"/vol/bitbucket/lst20/long_POPQA_treenodes/prefix/gemma3-12b_perturb/3_2_0/{m.replace('/', '-')}/complete/{tree_id}_checked.pkl"
-    #         try:
-    #             checked_tree = Tree.load_tree(
-    #                 device, checked_path, embedder=embedder, eval="term"
-    #             )
-    #         except FileNotFoundError:
-    #             continue
-    #         inter = inter_tree.root
-    #         full = checked_tree.root
-    #         queue = deque([(inter, full)])
-    #         # bfs
-    #         while queue:
-    #             node_inter, node_full = queue.popleft()
-
-    #             if len(node_inter.children) != len(node_full.children):
-    #                 # add terminal node from this perturbation
-    #                 for node in node_inter.children:
-    #                     full_terminals = node_full.metadata.get("terminal_applied", [])
-    #                     if isinstance(node, TerminalNode) and node.metadata["terminal_name"] not in full_terminals:
-    #                         node_full.children.append(node)
-
-    #             for child_inter, child_full in zip(node_inter.children, node_full.children):
-    #                 queue.append((child_inter, child_full))
-    #         # save tree for eval later
-    #         checked_tree.save_tree(checked_path)
-            
-    # 2. process checked trees for terminal nodes
-    for m in models:
-        with get_generator(m) as generator:
-            device = generator.model.device
-            for tree_id in tree_ids:
-                inter_path = f"{inter_dir}{tree_id}{file_ext}"
-                checked_path = f"/vol/bitbucket/lst20/long_POPQA_treenodes/prefix/gemma3-12b_perturb/3_2_0/{m.replace('/', '-')}/complete/{tree_id}_checked.pkl"
-                if not os.path.exists(checked_path):
+        target_tree.save_tree(inter_path)
+        for cand_tree, can_path in zip(candidate_trees, candidate_paths):
+            cand_tree.save_tree(can_path)
+    
+    # eval
+    print("****  start dialect eval  ****")
+    for gen_modelId in gen_modelIds:
+            with get_generator(gen_modelId) as generator:
+                print(type(generator))
+                device = generator.device
+                # read dataset
+                for tree_id in tree_ids:
+                
+                    final_path = f"{constants.TREE_DIR}{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
                     try:
-                        print(f"processing tree id {tree_id}")
-                        full_tree = Tree.load_tree(device, inter_path, embedder=embedder, generator=generator, eval='eval')
-                    except FileNotFoundError:
-                        print(f"no tree {checked_path}")
+                        full_tree = Tree.load_tree(device, final_path, embedder=embedder, generator=generator, eval='eval')
+                    except FileNotFoundError as e:
+                        print(e)
                         continue
-                    process_tree(full_tree, tree_id, m)
-                    full_tree.save_tree(checked_path)
-                    now = datetime.now()
-                    timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
-                    print(f"{timestamp}: tree saved to {checked_path}")
-        
-        clear_cache()
+                    # process final tree
+                    process_tree(full_tree, tree_id, gen_modelId)
+                    full_tree.save_tree(final_path)
+                    # write new full tree to term dir
+                    print(f"tree saved to {final_path}")
+
+
+def main():
+    global start_idx, end_idx, terminal_type, dataset_name, stategy_path
+
+    parser = argparse.ArgumentParser(description="Process input flags.")
+    parser.add_argument('--start_idx', type=int, default=start_idx, help='Start index')
+    parser.add_argument('--end_idx', type=int, default=end_idx, help='End index')
+    parser.add_argument('--term_type', type=str, default=terminal_type, help='Terminal type')
+    parser.add_argument('--dataset', type=str, default=dataset_name, help='Dataset name')
+    parser.add_argument('--strategy_path', type=str, default=stategy_path, help='Strategy path')
+
+    args = parser.parse_args()
+
+    # Update globals with parsed values
+    start_idx = args.start_idx
+    end_idx = args.end_idx
+    terminal_type = args.term_type
+    dataset_name = args.dataset
+    stategy_path = args.strategy_path
+
+    print(f"[INFO] Called get_term_perturb with term_type={terminal_type}, strategy_path={stategy_path}, dataset_name={dataset_name}")
+    print(f"processing trees from index {start_idx} to {end_idx}")
+
+    process_dialect()
+
+    print("===================== missing candidate trees =====================")
+    print(missing_tree_path)
 
 if __name__ == "__main__":
-    partition = 1
-    print(f"processiing partition {partition + 1} / 2")
-    main(partition)
+    main()
+
+    
+    

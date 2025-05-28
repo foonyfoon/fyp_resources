@@ -3,11 +3,11 @@ from collections import deque
 import time
 import os
 import logging
-from abc import ABC, abstractmethod
+from abc import ABC
 from typing import Tuple
-import logging
 import pickle
 import io
+from enum import Enum
 
 import networkx as nx
 import matplotlib.pyplot as plt
@@ -25,7 +25,11 @@ from adapters.prompt_package import PromptPackage
 from adapters.rag import RAGAgent
 from tree.node import RootNode, SyntacticNode, SemanticNode
 
-
+class ProcessingState(Enum):
+    EVAL = "eval"
+    TERMINAL = "terminal"
+    RETRIEVE = "perturb"
+    
 class AbstractTree(ABC):
     def print_tree(self, node=None, level=0, model_name=None, truncate_passage=True):
         def _tuncate_wiki_page(page: tuple, max_char=45) -> tuple:
@@ -133,24 +137,32 @@ class Tree(AbstractTree):
         """
         # answer model
         stage = kwargs.get("eval", "sem")
-        if stage == "eval" or (isinstance(stage, bool) and stage):
+        # Normalize stage to a string
+        if isinstance(stage, bool):
+            stage = "eval" if stage else "sem"
+            
+        if stage == "eval":
             self.generator = kwargs.get("generator")
             self.rag = RAGAgent(eval=True, generator=self.generator)
             self.base = SemanticAdapter(self.generator)
-        elif stage == "sem":
-            self.rag = RAGAgent(
-                eval=False,
-                ner_model=kwargs.get("ner_model"),
-                embedder=kwargs.get("embedder"),
-            )
-            # preturb model
-            self.sem_perturber: SemanticPerturber = kwargs.get("sem_perturber")
-            s_wiki_title = kwargs.get("s_wiki_title")
-            if self.sem_perturber:
-                self.sem_perturber.setup_perturber(root_prompt, s_wiki_title)
-            self.syn_perturber = kwargs.get("syn_perturber")
-            self.embed_model: EmbedAdapter = kwargs.get("embedder")
-            self.root.embedding = self.embed_model.encode(root_prompt)
+            self.prompt_ans_map = {}
+        else:
+            # state is terminal or sem
+            self.embed_model: EmbedAdapter = kwargs.get("embedder") 
+            # retrieval stpe only
+            if stage == "sem":
+                self.rag = RAGAgent(
+                    eval=False,
+                    ner_model=kwargs.get("ner_model"),
+                    embedder=kwargs.get("embedder"),
+                )
+                # preturb model
+                self.sem_perturber: SemanticPerturber = kwargs.get("sem_perturber")
+                s_wiki_title = kwargs.get("s_wiki_title")
+                if self.sem_perturber:
+                    self.sem_perturber.setup_perturber(root_prompt, s_wiki_title)
+                self.syn_perturber = kwargs.get("syn_perturber")
+            
             
         self.root_prompt = root_prompt
         self.num_semantic = 0
@@ -158,6 +170,10 @@ class Tree(AbstractTree):
 
         prev_state = kwargs.get("prev_state", None)
         self.root = RootNode(root_prompt) if prev_state is None else prev_state["root"]
+        
+        # retrieval step only
+        if not stage == "eval":
+            self.root.embedding = self.embed_model.encode(root_prompt)
 
         if prev_state is not None:
             self.rag_entities = prev_state.get("rag_entities")
@@ -166,9 +182,9 @@ class Tree(AbstractTree):
             self.root.rag_closest_match = prev_state.get("rag_closest_match")
             self.gt_passage = prev_state.get("gt_passage")
             self.root.wiki_title = prev_state.get("wiki_title")
+        
+        # Otherwise, run retriever pipeline    
         elif stage == "sem":
-            # Otherwise, run retriever pipeline
-            # root
             wiki_data = self.rag.retrieve_wiki_data_2(root_prompt)
             self.gt_passage = self.rag.find_gt_passage(s_wiki_title, root_prompt)
             closest_match = self.construct_retrieved_evidence(0, wiki_data, root_prompt, correct_docs=len(self.gt_passage))
@@ -554,14 +570,25 @@ class Tree(AbstractTree):
     def process_node(self, node, model_name):
         # call sem check if response is not in node
         if not node.answers or model_name not in node.answers:
-            # base
-            response = self.base.sem_check(node.prompt, model_name)
-            base_rag_response = "No answer"
-            # rag
-            if node.rag_closest_match is not None:
-                base_rag_response = self.rag.answer_using_wiki_2(
-                    model_name, node.prompt, node.rag_closest_match
-                )
+            # check cache
+            if node.prompt in self.prompt_ans_map and model_name in self.prompt_ans_map[node.prompt]:
+                response, base_rag_response = self.prompt_ans_map[node.prompt][model_name]
+                print(f"Reusing cached answer for prompt: {node.prompt}")
+            else:
+                # base
+                response = self.base.sem_check(node.prompt, model_name)
+                base_rag_response = "No answer"
+                # rag
+                if node.rag_closest_match is not None:
+                    base_rag_response = self.rag.answer_using_wiki_2(
+                        model_name, node.prompt, node.rag_closest_match
+                    )
+                # update cache
+                if node.prompt not in self.prompt_ans_map:
+                    self.prompt_ans_map[node.prompt] = {}
+                self.prompt_ans_map[node.prompt][model_name] = (response, base_rag_response)
+
+            # store ans
             node.answers[model_name] = {}
             node.answers[model_name]["base"] = response
             node.answers[model_name]["base_rag"] = base_rag_response
@@ -801,7 +828,7 @@ class Tree(AbstractTree):
             pickle.dump(node, file)
 
     @staticmethod
-    def load_tree(device, file_path, eval=False, **kargs):
+    def load_tree(device, file_path, eval='sem', **kargs):
         prev_state = {}
         with open(file_path, "rb") as file:
             prev_state = pickle.load(file)

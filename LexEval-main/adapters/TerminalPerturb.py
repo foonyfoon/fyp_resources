@@ -46,11 +46,11 @@ class DialectPerturber(TerminalPerturber):
         self.dialect = dialect
         self.prompt_history: list[str] = []  # dedup queue
         self.name = f"{self.dialect}_dialect"
-        if dialect == 'hk':
-            self.model = Dialects.HongKongDialect()
+        if dialect == 'sg':
+            self.model = Dialects.ColloquialSingaporeDialect()
         else:
             # TODO: omg....
-            self.model = Dialects.HongKongDialect()
+            self.model = Dialects.ColloquialSingaporeDialect()
     
     def terminal_perturb(self,
                          pkg: PromptPackage,
@@ -68,7 +68,7 @@ class DialectPerturber(TerminalPerturber):
             rules = self.model.executed_rules
             clear_cache()
             # check validity
-            is_valid = candidate not in self.prompt_history
+            is_valid = candidate not in self.prompt_history and not candidate == og_prompt
             
             if not is_valid:
                 retry += 1
@@ -131,6 +131,7 @@ class PositionPerturber(TerminalPerturber):
             prefix_text = " ".join(sent_list[:insert_pos])
             suffix_text = " ".join(sent_list[insert_pos:])
             candidate = f"{prefix_text} {base_prompt} {suffix_text}".strip()
+
         new_state = {
                 **pkg.state,
                 "terminal_name": self.name,
@@ -140,6 +141,7 @@ class PositionPerturber(TerminalPerturber):
                 "num_extra_sent": len(sent_list)
                 
             }
+        
         new_pkg = replace(
                 pkg,
                 text=candidate,

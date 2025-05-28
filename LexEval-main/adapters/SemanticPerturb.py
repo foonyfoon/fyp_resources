@@ -392,7 +392,7 @@ class PrefixPerturber(SemanticPerturber):
         new_state = {
             **pkg.state,
             "base_prompt": pkg.state.get("base_prompt", base_prompt),
-            "prefix_similarity": -best_score,
+            "prefix_similarity": best_score,
             "is_valid": pkg.state.get("is_valid", True),
             "prefix_text": f"{pkg.state.get("prefix_text", "")} {best_prefix}".strip(),
         }
