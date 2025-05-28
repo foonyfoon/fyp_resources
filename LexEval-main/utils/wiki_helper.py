@@ -44,7 +44,7 @@ class WikiHelper:
                 continue
 
             # Generate embedding and context
-            context = f"Title: {page_data["title"]}\n{page_data["content"]}"
+            context = f"Title: {page_data['title']}\n{page_data['content']}"
             embedding_vector = self.encoder.encode(context)
             page_data["context"] = context
             page_data["keywords"] = entity
