@@ -21,13 +21,14 @@ each question, answer tree has new value:
 '''
 
 # ########### set ###########
-start_idx = 0
-end_idx = 170
+start_idx = 341
+end_idx = 500
 
 # terminal_type = 'sg_dialect'
 # dataset_name = "TQA"
-# stategy_path = "para"
+# stategy_path = "para" / "prefix"
 
+long = False
 terminal_type = 'position'
 dataset_name = "TQA"
 stategy_path = "para-prefix"
@@ -257,7 +258,10 @@ def process_dialect():
     perturbers = get_term_perturb(terminal_type)
     embedder = RobertaEmbedder()
     tree_ids = []
-    inter_dir = f'{constants.TREE_DIR}{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/tree/'
+    if long:
+        inter_dir = f'{constants.TREE_DIR}long_{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/tree/'
+    else:
+        inter_dir = f'{constants.TREE_DIR}{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/tree/'
     for filename in os.listdir(inter_dir):
         if filename.endswith('.pkl'):
             tree_ids.append(int(filename[: -len('.pkl')]))
@@ -283,7 +287,10 @@ def process_dialect():
         candidate_trees = []
         candidate_paths = []
         for gen_modelId in gen_modelIds:
-            final_path = f"{constants.TREE_DIR}{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
+            if long:
+                final_path = f"{constants.TREE_DIR}long_{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
+            else:
+                final_path = f"{constants.TREE_DIR}{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
             try:
                 cand_tree = Tree.load_tree(embedder.model.device, final_path, embedder=embedder, eval="terminal")
             except FileNotFoundError as e:
@@ -308,8 +315,10 @@ def process_dialect():
                 device = generator.device
                 # read dataset
                 for tree_id in tree_ids:
-                
-                    final_path = f"{constants.TREE_DIR}{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
+                    if long:
+                        final_path = f"{constants.TREE_DIR}long_{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
+                    else:
+                        final_path = f"{constants.TREE_DIR}{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
                     try:
                         full_tree = Tree.load_tree(device, final_path, embedder=embedder, generator=generator, eval='eval')
                     except FileNotFoundError as e:
@@ -323,7 +332,7 @@ def process_dialect():
 
 
 def main():
-    global start_idx, end_idx, terminal_type, dataset_name, stategy_path
+    global start_idx, end_idx, terminal_type, dataset_name, stategy_path, long
 
     parser = argparse.ArgumentParser(description="Process input flags.")
     parser.add_argument('--start_idx', type=int, default=start_idx, help='Start index')
@@ -331,6 +340,11 @@ def main():
     parser.add_argument('--term_type', type=str, default=terminal_type, help='Terminal type')
     parser.add_argument('--dataset', type=str, default=dataset_name, help='Dataset name')
     parser.add_argument('--strategy_path', type=str, default=stategy_path, help='Strategy path')
+    parser.add_argument(
+        '--long',
+        action='store_true',
+        help='Use a long tree'
+    )
 
     args = parser.parse_args()
 
@@ -340,8 +354,9 @@ def main():
     terminal_type = args.term_type
     dataset_name = args.dataset
     stategy_path = args.strategy_path
+    long = args.long 
 
-    print(f"[INFO] Called get_term_perturb with term_type={terminal_type}, strategy_path={stategy_path}, dataset_name={dataset_name}")
+    print(f"[INFO] Called get_term_perturb with term_type={terminal_type}, strategy_path={stategy_path}, dataset_name={dataset_name}, long={long}")
     print(f"processing trees from index {start_idx} to {end_idx}")
 
     process_dialect()
