@@ -2,8 +2,9 @@ from tree.node import TerminalNode
 import utils.constants as constants
 from tree.tree import ReadTree
 from tree.node import RootNode, SemanticNode, SyntacticNode
-from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from utils.dataset_sampling import read_dataset
+
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from rouge_score import rouge_scorer
 import pandas as pd
 import matplotlib.pyplot as plt

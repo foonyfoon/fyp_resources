@@ -12,9 +12,8 @@ start_idx = 0
 end_idx = 500
 
 gen_modelIds = [
-    "google/gemma-3-1b-it",
-    "google/gemma-3-12b-it",
     "mistralai/Mistral-7B-Instruct-v0.2",
+    "google/gemma-3-12b-it",
 ]
 missing_tree_path = []
 
@@ -51,6 +50,7 @@ def eval_trees():
     for filename in os.listdir(inter_dir):
         if filename.endswith(".pkl"):
             tree_ids.append(int(filename[: -len(".pkl")]))
+    tree_ids.sort()  # Sort the list in ascending order
     tree_ids = tree_ids[start_idx:end_idx]
 
     embedder = RobertaEmbedder()

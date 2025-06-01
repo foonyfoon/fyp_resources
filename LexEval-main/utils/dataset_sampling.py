@@ -1,14 +1,17 @@
 import os
 import re
-import utils.constants as constants
 import logging
-import pandas as pd
+
+
+import utils.constants as constants
+from adapters.OAI_Embeddings import EmbedAdapter, RobertaEmbedder
+
 from sklearn.model_selection import train_test_split
 import spacy
 from typing import List, Tuple
 from datasets import load_dataset, concatenate_datasets
 import torch
-from adapters.OAI_Embeddings import EmbedAdapter, RobertaEmbedder
+import pandas as pd
 from sklearn.cluster import KMeans
 import numpy as np
 

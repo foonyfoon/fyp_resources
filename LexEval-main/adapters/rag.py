@@ -103,10 +103,21 @@ class RAGAgent:
 
         db_embeddings, title_text_dict = self.create_passage_db(wiki_data)  # (N, hidden_size) tensor, List[str]
         similarity_scores = similarities(db_embeddings, prompt_embedding)
+        similarity_scores = similarity_scores.squeeze()  # Ensure it's 1D
+
+        # Ensure similarity_scores is at least 1D
+        if similarity_scores.dim() == 0:
+            similarity_scores = similarity_scores.unsqueeze(0)
+
         k = min(top_k, similarity_scores.shape[0])
-        top_values, top_indices = torch.topk(similarity_scores.squeeze(), k)
-        # returns tuple of {title: context} dict and sim_score of doc with prompt
-        return [(title_text_dict[idx], float(top_values[i].item())) for i, idx in enumerate(top_indices)]
+        top_values, top_indices = torch.topk(similarity_scores, k)
+
+        # Ensure top_indices and top_values are 1D
+        if top_indices.dim() == 0:
+            top_indices = top_indices.unsqueeze(0)
+            top_values = top_values.unsqueeze(0)
+
+        return [(title_text_dict[idx.item()], float(top_values[i].item())) for i, idx in enumerate(top_indices)]
 
 
     def find_most_relevant_page(

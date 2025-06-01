@@ -1,4 +1,3 @@
-import torch
 import gc
 import logging
 from dataclasses import replace
@@ -7,6 +6,21 @@ from typing import Any, Dict, List, Union
 from adapters.prompt_package import PromptPackage
 import nltk
 from nltk.tokenize import sent_tokenize
+import torch
+# 1) Save the original torch.load
+_orig_torch_load = torch.load
+
+# 2) Define a patched version that always sets weights_only=False
+def _patched_torch_load(f, *args, **kwargs):
+    # If someone explicitly passed weights_only=True, let them—
+    # but by default, override to False so that full unpickling is allowed.
+    if "weights_only" not in kwargs:
+        kwargs["weights_only"] = False
+    return _orig_torch_load(f, *args, **kwargs)
+
+# 3) Replace torch.load with our patched version
+torch.load = _patched_torch_load
+print(torch.__version__)
 
 # Make sure to download the tokenizer once (if not already done)
 # ---------------------------------------------------------------------------
@@ -49,8 +63,7 @@ class DialectPerturber(TerminalPerturber):
         if dialect == 'sg':
             self.model = Dialects.ColloquialSingaporeDialect()
         else:
-            # TODO: omg....
-            self.model = Dialects.ColloquialSingaporeDialect()
+            raise NotImplementedError()
     
     def terminal_perturb(self,
                          pkg: PromptPackage,
@@ -74,12 +87,20 @@ class DialectPerturber(TerminalPerturber):
                 retry += 1
         
         # return results
+        prev_terminal_name = pkg.state.get("terminal_name")
+
+        if prev_terminal_name:
+            terminal_name = prev_terminal_name + ";" + self.name
+        else:
+            terminal_name = self.name
+
         new_state = {
-                    **pkg.state,
-                    "terminal_name":self.name,
-                    "terminal_prompt": candidate,
-                    "rules": rules
-                }
+            **pkg.state,
+            "terminal_name": terminal_name,
+            "terminal_prompt": candidate,
+            "rules": rules
+        }
+
         new_state["is_valid"] = is_valid
         new_pkg = replace(
                 pkg,
@@ -132,9 +153,16 @@ class PositionPerturber(TerminalPerturber):
             suffix_text = " ".join(sent_list[insert_pos:])
             candidate = f"{prefix_text} {base_prompt} {suffix_text}".strip()
 
+        prev_terminal_name = pkg.state.get("terminal_name")
+
+        if prev_terminal_name:
+            terminal_name = prev_terminal_name + ";" + self.name
+        else:
+            terminal_name = self.name
+            
         new_state = {
                 **pkg.state,
-                "terminal_name": self.name,
+                "terminal_name": terminal_name,
                 "terminal_prompt": candidate,
                 "is_valid": True,
                 "position": self.position,
