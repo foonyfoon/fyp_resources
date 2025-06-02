@@ -31,9 +31,9 @@ end_idx = 600
 eval_only = False
 perturb_only = True
 long = False
-terminal_type = 'sg_dialect'
-dataset_name = "TQA"
-stategy_path = "para-prefix"
+terminal_type = 'position'
+dataset_name = "POPQA"
+strategy_path = "para-prefix"
 # ###########################
 missing_tree_path = []
 gen_modelIds = constants.MODELS
@@ -80,9 +80,9 @@ def save_tree(file_path, **kwargs):
     print(node)
 
     # Ensure directory exists
-    dir = os.path.dirname(file_path)
-    if not os.path.exists(dir):
-        os.makedirs(dir)
+    out_dir = os.path.dirname(file_path)
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
 
     # Save to file
     with open(file_path, "wb") as file:
@@ -135,7 +135,7 @@ def generate_terminal_node(
                     perturbation,
                     sem_sim,
                     root_sim,
-                    tree.embed_model.encode(perturbation),
+                    perturb_embedding,
                     rag_closest_match,
                     rag_entities,
                     ner_entities,
@@ -292,47 +292,51 @@ def process_dialect():
         print("****  start dialect perturb  ****")
     
         for tree_id in tree_ids:
-            print(f"perturb tree q_id={tree_id}")
-            inter_path = f"{inter_dir}{tree_id}.pkl"
             try:
-                inter_tree = Tree.load_tree(embedder.model.device, inter_path, eval="terminal", embedder=embedder)
-            except FileNotFoundError as e:
-                print(e)
-                continue
-            for perturber in perturbers:
-                apply_terminal_preturb(perturber, inter_tree)
-            inter_tree.save_tree(inter_path)
-            # replicate to checked trees
-            try:
-                target_tree = Tree.load_tree(embedder.model.device, inter_path, embedder=embedder, eval="terminal")
-            except FileNotFoundError as e:
-                print(e)
-                continue
-            except Exception as e:
-                print(e)
-                continue
-            candidate_trees = []
-            candidate_paths = []
-            for gen_modelId in gen_modelIds:
-                if long:
-                    final_path = f"{constants.TREE_DIR}long_{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
-                else:
-                    final_path = f"{constants.TREE_DIR}{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
+                print(f"perturb tree q_id={tree_id}")
+                inter_path = f"{inter_dir}{tree_id}.pkl"
                 try:
-                    cand_tree = Tree.load_tree(embedder.model.device, final_path, embedder=embedder, eval="terminal")
-                except Exception as e:
-                    missing_tree_path.append(final_path)
+                    inter_tree = Tree.load_tree(embedder.model.device, inter_path, eval="terminal", embedder=embedder)
+                except FileNotFoundError as e:
                     print(e)
                     continue
-                candidate_trees.append(cand_tree)
-                candidate_paths.append(final_path)
-            
-            if candidate_trees:
-                clone_terminal_nodes(target_tree, candidate_trees)
-            
-            target_tree.save_tree(inter_path)
-            for cand_tree, can_path in zip(candidate_trees, candidate_paths):
-                cand_tree.save_tree(can_path)
+                for perturber in perturbers:
+                    apply_terminal_preturb(perturber, inter_tree)
+                inter_tree.save_tree(inter_path)
+                # replicate to checked trees
+                try:
+                    target_tree = Tree.load_tree(embedder.model.device, inter_path, embedder=embedder, eval="terminal")
+                except FileNotFoundError as e:
+                    print(e)
+                    continue
+                except Exception as e:
+                    print(e)
+                    continue
+                candidate_trees = []
+                candidate_paths = []
+                for gen_modelId in gen_modelIds:
+                    if long:
+                        final_path = f"{constants.TREE_DIR}long_{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
+                    else:
+                        final_path = f"{constants.TREE_DIR}{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
+                    try:
+                        cand_tree = Tree.load_tree(embedder.model.device, final_path, embedder=embedder, eval="terminal")
+                    except Exception as e:
+                        missing_tree_path.append(final_path)
+                        print(e)
+                        continue
+                    candidate_trees.append(cand_tree)
+                    candidate_paths.append(final_path)
+                
+                if candidate_trees:
+                    clone_terminal_nodes(target_tree, candidate_trees)
+                
+                target_tree.save_tree(inter_path)
+                for cand_tree, can_path in zip(candidate_trees, candidate_paths):
+                    cand_tree.save_tree(can_path)
+            except Exception as e:
+                print(e)
+                pass
         
     # eval
     if not perturb_only:
@@ -350,8 +354,11 @@ def process_dialect():
                         try:
                             full_tree = Tree.load_tree(device, final_path, embedder=embedder, generator=generator, eval='eval')
                         except FileNotFoundError as e:
-                            print(e)
-                            continue
+                            try:
+                                inter_path = f"{inter_dir}{tree_id}.pkl"
+                                full_tree = Tree.load_tree(device, inter_path, embedder=embedder, generator=generator, eval='eval')
+                            except FileNotFoundError as e:
+                                print(e)
                         # process final tree
                         process_tree(full_tree, tree_id, gen_modelId)
                         try:
@@ -396,12 +403,12 @@ def main():
     end_idx = args.end_idx
     terminal_type = args.term_type
     dataset_name = args.dataset
-    stategy_path = args.strategy_path
+    strategy_path = args.strategy_path
     long = args.long
     eval_only = args.eval_only 
     perturb_only = args.perturb_only 
 
-    print(f"[INFO] Called get_term_perturb with term_type={terminal_type}, strategy_path={stategy_path}, dataset_name={dataset_name}, long={long}")
+    print(f"[INFO] Called get_term_perturb with term_type={terminal_type}, strategy_path={strategy_path}, dataset_name={dataset_name}, long={long}")
     print(f"processing trees from index {start_idx} to {end_idx}")
 
     process_dialect()
