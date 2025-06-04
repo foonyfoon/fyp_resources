@@ -46,7 +46,7 @@ def get_generator(modelId: str) -> LLMAdapter:
 
 def eval_trees():
     tree_ids = []
-    inter_dir = f"{constants.TREE_DIR}{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/tree/"
+    inter_dir = f"{constants.TREE_DIR}{dataset_name}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/tree/"
     for filename in os.listdir(inter_dir):
         if filename.endswith(".pkl"):
             tree_ids.append(int(filename[: -len(".pkl")]))
@@ -61,51 +61,40 @@ def eval_trees():
             device = generator.device
             # read dataset
             for tree_id in tree_ids:
-
-                final_path = f"{constants.TREE_DIR}{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
+                if long:
+                    final_path = f"{constants.TREE_DIR}long_{dataset_name}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
+                else:
+                    final_path = f"{constants.TREE_DIR}{dataset_name}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
                 try:
-                    full_tree = Tree.load_tree(
-                        device,
-                        final_path,
-                        embedder=embedder,
-                        generator=generator,
-                        eval="eval",
-                    )
-                except FileNotFoundError:
-                    inter_dir = f'{constants.TREE_DIR}{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/tree/'
-                    inter_path = f"{inter_dir}{tree_id}.pkl"
+                    full_tree = Tree.load_tree(device, final_path, embedder=embedder, generator=generator, eval='eval')
+                except FileNotFoundError as e:
                     try:
-                        full_tree = Tree.load_tree(
-                            device,
-                            inter_path,
-                            embedder=embedder,
-                            generator=generator,
-                            eval="eval",
-                        )
-                    except FileNotFoundError as e:
-                        print(f" no tree {tree_id}: {e}")
-                        missing_tree_path.append(tree_id)  # Track failure
-                        continue  # Skip processing this tree
+                        inter_path = f"{inter_dir}{tree_id}.pkl"
+                        full_tree = Tree.load_tree(device, inter_path, embedder=embedder, generator=generator, eval='eval')
                     except Exception as e:
-                        print(f"Error loading tree {tree_id}: {e}")
+                        print(e)
                         continue
                 # process final tree
                 process_tree(full_tree, tree_id, gen_modelId)
-                full_tree.save_tree(final_path)
+                try:
+                    full_tree.save_tree(final_path)
+                except Exception as e:
+                    missing_tree_path.append(final_path)
+                    print(e)
+                    continue
                 # write new full tree to term dir
                 print(f"tree saved to {final_path}")
 
 
 def main():
-    global start_idx, end_idx, terminal_type, dataset_name, stategy_path
+    global start_idx, end_idx, terminal_type, dataset_name, strategy_path, long, eval_only, perturb_only
 
     parser = argparse.ArgumentParser(description="Process input flags.")
     parser.add_argument('--start_idx', type=int, default=start_idx, help='Start index')
     parser.add_argument('--end_idx', type=int, default=end_idx, help='End index')
     parser.add_argument('--term_type', type=str, default=terminal_type, help='Terminal type')
     parser.add_argument('--dataset', type=str, default=dataset_name, help='Dataset name')
-    parser.add_argument('--strategy_path', type=str, default=stategy_path, help='Strategy path')
-
+    parser.add_argument('--strategy_path', type=str, default=strategy_path, help='Strategy path')
     args = parser.parse_args()
 
     # Update globals with parsed values
