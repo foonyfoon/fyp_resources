@@ -61,10 +61,7 @@ def eval_trees():
             device = generator.device
             # read dataset
             for tree_id in tree_ids:
-                if long:
-                    final_path = f"{constants.TREE_DIR}long_{dataset_name}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
-                else:
-                    final_path = f"{constants.TREE_DIR}{dataset_name}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
+                final_path = f"{constants.TREE_DIR}{dataset_name}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
                 try:
                     full_tree = Tree.load_tree(device, final_path, embedder=embedder, generator=generator, eval='eval')
                 except FileNotFoundError as e:
