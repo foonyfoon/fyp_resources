@@ -41,6 +41,11 @@ def clear_cache() -> None:
     logging.info("after clearing cache, %s/%s memory available", free_mem, total_mem)
 
 class TerminalPerturber(ABC):
+    
+    @abstractmethod
+    def get_combined_name(self, pkg) -> str:
+        """Get the name of the perturbation."""
+        
     @abstractmethod
     def terminal_perturb(self, pkg: PromptPackage, **kwargs) -> PromptPackage: 
         """Return new datapackage after perturbation."""
@@ -65,6 +70,16 @@ class DialectPerturber(TerminalPerturber):
         else:
             raise NotImplementedError()
     
+    def get_combined_name(self, prev_terminal_name: str) -> str:
+        """Get the name of the perturbation."""
+        if prev_terminal_name:
+            terminal_name = prev_terminal_name + ";" + self.name
+        else:
+            terminal_name = self.name
+        
+        return terminal_name
+    
+    
     def terminal_perturb(self,
                          pkg: PromptPackage,
                          max_retries: int = 5,
@@ -86,14 +101,8 @@ class DialectPerturber(TerminalPerturber):
             if not is_valid:
                 retry += 1
         
-        # return results
-        prev_terminal_name = pkg.state.get("terminal_name")
-
-        if prev_terminal_name:
-            terminal_name = prev_terminal_name + ";" + self.name
-        else:
-            terminal_name = self.name
-
+        terminal_name = self.get_combined_name(pkg.state.get("terminal_name"))
+        
         new_state = {
             **pkg.state,
             "terminal_name": terminal_name,
@@ -129,6 +138,16 @@ class PositionPerturber(TerminalPerturber):
         self.position = index
         self.name = f"question_position_{self.position}"
     
+    def get_combined_name(self, prev_terminal_name: str) -> str:
+        """Get the name of the perturbation."""
+        if prev_terminal_name:
+            terminal_name = prev_terminal_name + ";" + self.name
+        else:
+            terminal_name = self.name
+        
+        return terminal_name
+    
+    
     def terminal_perturb(self,
                          pkg: PromptPackage,
                         **kwargs) -> PromptPackage: 
@@ -153,12 +172,7 @@ class PositionPerturber(TerminalPerturber):
             suffix_text = " ".join(sent_list[insert_pos:])
             candidate = f"{prefix_text} {base_prompt} {suffix_text}".strip()
 
-        prev_terminal_name = pkg.state.get("terminal_name")
-
-        if prev_terminal_name:
-            terminal_name = prev_terminal_name + ";" + self.name
-        else:
-            terminal_name = self.name
+        terminal_name = self.get_combined_name(pkg.state.get("terminal_name"))
             
         new_state = {
                 **pkg.state,

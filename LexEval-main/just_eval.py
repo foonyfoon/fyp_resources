@@ -83,9 +83,12 @@ def eval_trees():
                             eval="eval",
                         )
                     except FileNotFoundError as e:
-                        print(e)
+                        print(f" no tree {tree_id}: {e}")
                         missing_tree_path.append(tree_id)  # Track failure
                         continue  # Skip processing this tree
+                    except Exception as e:
+                        print(f"Error loading tree {tree_id}: {e}")
+                        continue
                 # process final tree
                 process_tree(full_tree, tree_id, gen_modelId)
                 full_tree.save_tree(final_path)

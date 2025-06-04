@@ -22,21 +22,25 @@ each question, answer tree has new value:
 
 # ########### set ###########
 start_idx = 0
-end_idx = 600
-
+end_idx = 149
 # terminal_type = 'sg_dialect'
 # dataset_name = "TQA"
-# stategy_path = "para" / "prefix"
+# strategy_path = "para" / "prefix"
 
 eval_only = False
 perturb_only = True
 long = False
-terminal_type = 'position'
+terminal_type = 'sg_dialect'
 dataset_name = "POPQA"
 strategy_path = "para-prefix"
 # ###########################
 missing_tree_path = []
 gen_modelIds = constants.MODELS
+VALID_TERMS = ['question_position_suffix', 'question_position_middle',
+                'sg_dialect',
+                'prefix', 'para-prefix', 'para',
+                'question_position_suffix;sg_dialect', 'question_position_middle;sg_dialect',
+                ]
 
 def get_term_perturb(term_type: str) -> list:
     if term_type == "sg_dialect":
@@ -161,8 +165,8 @@ def apply_terminal_preturb(term_perturber: TerminalPerturber, tree: Tree):
         node, curr_level = queue.popleft()
         if isinstance(node, TerminalNode):
             continue  # Skip terminal nodes
-        elif isinstance(node, Node) and type_name in node.metadata.get("terminal_applied", []):
-            continue  # Skip processed nodes
+        # elif isinstance(node, Node) and type_name in node.metadata.get("terminal_applied", []):
+        #     continue  # Skip processed nodes
         elif isinstance(node, Node):
             # Generate a terminal node based on the current node
             #################################################################
@@ -171,13 +175,17 @@ def apply_terminal_preturb(term_perturber: TerminalPerturber, tree: Tree):
             candidates = [node]
             candidates.extend([child for child in node.children if isinstance(child, TerminalNode)])
             print(f"{len(candidates)} candidates")
-            print(f"terminal names: {[c.metadata.get('terminal_name', '') for c in candidates]}")
+            existing_candidate_terms = [c.metadata.get('terminal_name') for c in candidates if c.metadata.get('terminal_name') is not None]
+
+            print(f"terminal names: {existing_candidate_terms}")
 
             for cand_node in candidates:
                 terminal_name = cand_node.metadata.get("terminal_name", "")
-                if term_perturber.name in terminal_name:
+                # if candidate already exits or is invalid, skip
+                proposed_preturbation = term_perturber.get_combined_name(terminal_name)
+                print(proposed_preturbation)
+                if proposed_preturbation not in VALID_TERMS or proposed_preturbation in existing_candidate_terms:
                     continue
-                
                 term, is_valid = generate_terminal_node(tree, cand_node, term_perturber, use_parent_passage=True)
                 # You probably want to collect the valid terms
                 if is_valid:
@@ -278,12 +286,13 @@ def process_dialect():
     embedder = RobertaEmbedder()
     tree_ids = []
     if long:
-        inter_dir = f'{constants.TREE_DIR}long_{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/tree/'
+        inter_dir = f'{constants.TREE_DIR}long_{dataset_name}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/tree/'
     else:
-        inter_dir = f'{constants.TREE_DIR}{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/tree/'
+        inter_dir = f'{constants.TREE_DIR}{dataset_name}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/tree/'
     for filename in os.listdir(inter_dir):
         if filename.endswith('.pkl'):
             tree_ids.append(int(filename[: -len('.pkl')]))
+    tree_ids.sort()
     tree_ids = tree_ids[start_idx:end_idx]
     print(f"number_of_trees: {len(tree_ids)}, treeids: {tree_ids}")
     
@@ -316,9 +325,9 @@ def process_dialect():
                 candidate_paths = []
                 for gen_modelId in gen_modelIds:
                     if long:
-                        final_path = f"{constants.TREE_DIR}long_{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
+                        final_path = f"{constants.TREE_DIR}long_{dataset_name}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
                     else:
-                        final_path = f"{constants.TREE_DIR}{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
+                        final_path = f"{constants.TREE_DIR}{dataset_name}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
                     try:
                         cand_tree = Tree.load_tree(embedder.model.device, final_path, embedder=embedder, eval="terminal")
                     except Exception as e:
@@ -348,17 +357,18 @@ def process_dialect():
                     # read dataset
                     for tree_id in tree_ids:
                         if long:
-                            final_path = f"{constants.TREE_DIR}long_{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
+                            final_path = f"{constants.TREE_DIR}long_{dataset_name}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
                         else:
-                            final_path = f"{constants.TREE_DIR}{dataset_name}_treenodes/{stategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
+                            final_path = f"{constants.TREE_DIR}{dataset_name}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
                         try:
                             full_tree = Tree.load_tree(device, final_path, embedder=embedder, generator=generator, eval='eval')
                         except FileNotFoundError as e:
                             try:
                                 inter_path = f"{inter_dir}{tree_id}.pkl"
                                 full_tree = Tree.load_tree(device, inter_path, embedder=embedder, generator=generator, eval='eval')
-                            except FileNotFoundError as e:
+                            except Exception as e:
                                 print(e)
+                                continue
                         # process final tree
                         process_tree(full_tree, tree_id, gen_modelId)
                         try:
@@ -372,14 +382,14 @@ def process_dialect():
 
 
 def main():
-    global start_idx, end_idx, terminal_type, dataset_name, stategy_path, long, eval_only, perturb_only
+    global start_idx, end_idx, terminal_type, dataset_name, strategy_path, long, eval_only, perturb_only
 
     parser = argparse.ArgumentParser(description="Process input flags.")
     parser.add_argument('--start_idx', type=int, default=start_idx, help='Start index')
     parser.add_argument('--end_idx', type=int, default=end_idx, help='End index')
     parser.add_argument('--term_type', type=str, default=terminal_type, help='Terminal type')
     parser.add_argument('--dataset', type=str, default=dataset_name, help='Dataset name')
-    parser.add_argument('--strategy_path', type=str, default=stategy_path, help='Strategy path')
+    parser.add_argument('--strategy_path', type=str, default=strategy_path, help='Strategy path')
     parser.add_argument(
         '--long',
         action='store_true',
