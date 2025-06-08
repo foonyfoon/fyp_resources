@@ -5,9 +5,8 @@ from adapters.OAI_Embeddings import RobertaEmbedder
 import utils.constants as constants
 import argparse
 
-terminal_type = "position"
 dataset_name = "POPQA"
-strategy_path = "prefix"
+strategy_path = "para-prefix"
 start_idx = 0
 end_idx = 500
 
@@ -94,24 +93,22 @@ def eval_trees():
 
 
 def main():
-    global start_idx, end_idx, terminal_type, dataset_name, strategy_path, long, eval_only, perturb_only
+    global start_idx, end_idx, dataset_name, strategy_path, long, eval_only, perturb_only
 
     parser = argparse.ArgumentParser(description="Process input flags.")
     parser.add_argument('--start_idx', type=int, default=start_idx, help='Start index')
-    parser.add_argument('--end_idx', type=int, default=end_idx, help='End index')
-    parser.add_argument('--term_type', type=str, default=terminal_type, help='Terminal type')
+    parser.add_argument('--end_idx', type=int, default=end_idx, help='End index') 
     parser.add_argument('--dataset', type=str, default=dataset_name, help='Dataset name')
     parser.add_argument('--strategy_path', type=str, default=strategy_path, help='Strategy path')
     args = parser.parse_args()
 
     # Update globals with parsed values
     start_idx = args.start_idx
-    end_idx = args.end_idx
-    terminal_type = args.term_type
+    end_idx = args.end_idx 
     dataset_name = args.dataset
     strategy_path = args.strategy_path
 
-    print(f"[INFO] Called get_term_perturb with term_type={terminal_type}, strategy_path={strategy_path}, dataset_name={dataset_name}")
+    print(f"[INFO] Called get_term_perturb with strategy_path={strategy_path}, dataset_name={dataset_name}")
     print(f"processing trees from index {start_idx} to {end_idx}")
 
     eval_trees()
