@@ -23,7 +23,7 @@ from similarity.cosine_similarity import similarity
 from utils.timer import Timers
 from adapters.prompt_package import PromptPackage
 from adapters.rag import RAGAgent
-from tree.node import RootNode, SyntacticNode, SemanticNode
+from tree.node import RootNode, SyntacticNode, SemanticNode, TerminalNode
 
 class ProcessingState(Enum):
     EVAL = "eval"
@@ -662,7 +662,7 @@ class Tree(AbstractTree):
 
         return node.answers[model_name], values
 
-    def run_check_pop_qa_batched(self, index, model_name, batch_size=5):
+    def run_check_pop_qa_batched(self, index, model_name, batch_size=5, valid_terms=None):
         start_time = time.time()
         # Populate the queue with all nodes in the tree
         queue = deque([self.root])
@@ -691,18 +691,23 @@ class Tree(AbstractTree):
             for node in batch:
                 # Process the node sequentially
                 Timers.start(index, model_name, "sem_check")
+                if isinstance(node, TerminalNode) and valid_terms:
+                    if node.metadata.get("terminal_name") not in valid_terms:
+                        continue  # skip invalid terminals
                 answers, node_metrics = self.process_node(node, model_name)
+
                 Timers.end(index, model_name, "sem_check")
 
-                # Append results
-                responses.append(answers["base"])
-                base_rag_responses.append(answers["base_rag"])
+                if answers:
+                    # Append results
+                    responses.append(answers["base"])
+                    base_rag_responses.append(answers["base_rag"])
 
-                # Update the metrics
-                for metric in metrics:
-                    metrics[metric]["true_pos"] += node_metrics[metric]["true_pos"]
-                    metrics[metric]["false_pos"] += node_metrics[metric]["false_pos"]
-                    metrics[metric]["false_neg"] += node_metrics[metric]["false_neg"]
+                    # Update the metrics
+                    for metric in metrics:
+                        metrics[metric]["true_pos"] += node_metrics[metric]["true_pos"]
+                        metrics[metric]["false_pos"] += node_metrics[metric]["false_pos"]
+                        metrics[metric]["false_neg"] += node_metrics[metric]["false_neg"]
 
         # Calculate accuracy and F1 score for each model
         for metric in metrics:

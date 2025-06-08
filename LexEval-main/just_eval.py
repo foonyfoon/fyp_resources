@@ -14,11 +14,21 @@ end_idx = 500
 gen_modelIds = [
     "mistralai/Mistral-7B-Instruct-v0.2",
     "google/gemma-3-12b-it",
+    "google/gemma-3-1b-it",
 ]
+
+VALID_TERMS = {
+    'sg_dialect',
+    'question_position_suffix;sg_dialect',
+    'question_position_suffix',
+    'question_position_middle',
+    'question_position_middle;sg_dialect'
+}
+
 missing_tree_path = []
 
 def process_tree(tree: Tree, tree_idx, model_name):
-    tree.run_check_pop_qa_batched(tree_idx, model_name)
+    tree.run_check_pop_qa_batched(tree_idx, model_name, valid_terms=VALID_TERMS)
 
 
 def get_generator(modelId: str) -> LLMAdapter:

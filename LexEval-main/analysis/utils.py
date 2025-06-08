@@ -63,9 +63,9 @@ def read_trees_to_df(strategy: str, gen_modelId: str, dataset: str, terminal=Fal
             return meta['similarity']
         return 1
     long_prefix = "long_" if long else ""
-    terminal_suffix = 'terminal/' if terminal else ""
     strategy_path = constants.STRATEGY_PATH_DICT[strategy]
-    tree_dir_path = f"{constants.TREE_DIR}{long_prefix}{dataset}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{terminal_suffix}"
+    tree_dir_path = f"/vol/bitbucket/lst20/{long_prefix}{dataset}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/"
+    print(tree_dir_path)
     if not os.path.isdir(tree_dir_path) or not os.listdir(tree_dir_path):
         return pd.DataFrame()
     rows = []
@@ -91,17 +91,17 @@ def read_trees_to_df(strategy: str, gen_modelId: str, dataset: str, terminal=Fal
             queue = deque([(root, 0)])  # (node, layer)
             visited = {root}
             question_id = i
-            
+
             while queue:
                 base_found_match = False
                 rag_found_match = False
                 node, layer = queue.popleft()
 
-                          
+                # grab your two generated outputs
                 if not node.answers:
                     continue
-                
-                # grab your two generated outputs
+                if not terminal and isinstance(node, TerminalNode):
+                    continue
                 base_response = node.answers[gen_modelId]["base"].lower()
                 rag_response = node.answers[gen_modelId]["base_rag"].lower()
 
@@ -141,6 +141,9 @@ def read_trees_to_df(strategy: str, gen_modelId: str, dataset: str, terminal=Fal
                         'rag_prec_1':scores_br['rouge1'].precision,
                         'rag_prec_L':scores_br['rougeL'].precision,
                     }
+                    # BLEU
+                    # metrics['base_bleu'] = sentence_bleu([exp_low.split()], base_response.split(), smoothing_function=smooth_fn)
+                    # metrics['rag_bleu']  = sentence_bleu([exp_low.split()], rag_response.split(), smoothing_function=smooth_fn)
 
                     for k,v in metrics.items():
                         if v > best[k]:
@@ -216,6 +219,7 @@ def read_trees_to_df(strategy: str, gen_modelId: str, dataset: str, terminal=Fal
 gen_models = ["google/gemma-3-12b-it", "google/gemma-3-1b-it", "mistralai/Mistral-7B-Instruct-v0.2"]
 #, "mistral.mistral-7b-instruct-v0:2"
 # Define base colors for models
+
 model_colors = {
     'google/gemma-3-1b-it':'green',  # green
     'google/gemma-3-12b-it': 'blue',  # blue
@@ -249,7 +253,6 @@ def agg_df(df, group_by=['gen_modelId','para_type','layer']):
           )
           .reset_index()
     )
-
 def plot_by_layer(
     agg_df,
     gen_models,
