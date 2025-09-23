@@ -29,7 +29,7 @@ class Chunk:
         self.dependants: List["Chunk"] = []
         self.resolved_text: str = text
         # key: span of the chunk this one depends on
-        # value: (start, end) *relative* indices inside self.text
+        # value: (start, end) relative indices inside self.text
         self.depend_on: Dict[Span, Tuple[int,int]] = {}
         self.in_degree: int = 0
 
@@ -81,7 +81,6 @@ class CorefResolution():
               chunk_map[span] = ch
 
       # 2) Composite-within-span dependencies
-      #    e.g. “She and Kitty” chunk should depend on “She” chunk
       for outer in list(chunk_map.values()):
           for inner in list(chunk_map.values()):
               if outer is inner:
@@ -93,7 +92,7 @@ class CorefResolution():
                       continue
                   # compute relative slice inside outer.text
                   rel_start = inner.span[0] - outer.span[0]
-                  rel_end   = inner.span[1] - outer.span[0]
+                  rel_end = inner.span[1] - outer.span[0]
                   outer.depend_on[inner.span] = (rel_start, rel_end)
                   outer.in_degree += 1
                   # register for graph traversal
@@ -113,9 +112,9 @@ class CorefResolution():
           # chunk.depend_on maps dep_span -> (rel_start, rel_end) within chunk.text
           for dep_span, (rs, re) in chunk.depend_on.items():
               dep = chunk_map[dep_span]
-              # replace that slice in chunk.resolved_text
+              # each time pop a chunk off the queue apply resolution immedately
               before = chunk.resolved_text[:rs]
-              after  = chunk.resolved_text[re:]
+              after = chunk.resolved_text[re:]
               chunk.resolved_text = before + dep.resolved_text + after
 
           resolved_order.append(chunk)
@@ -149,7 +148,7 @@ class CorefResolution():
       offset = 0
       for orig_start, orig_end, replacement in flat:
           start = orig_start + offset
-          end   = orig_end   + offset
+          end = orig_end + offset
 
           # splice in the replacement
           resolved = resolved[:start] + replacement + resolved[end:]

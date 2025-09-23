@@ -274,6 +274,7 @@ class PrefixPerturber(SemanticPerturber):
         K: int = 15,
         T_init: float = 1.0,
         T_decay: float = 0.8,
+        temp: bool = False,
         **kwargs,
     ) -> PromptPackage:
         """
@@ -368,9 +369,9 @@ class PrefixPerturber(SemanticPerturber):
             new_score = sim_scores[prompt_list_idx]
             doc_list_idx = prompt["idx"]
 
-            delta = current_score - new_score # always accept where new score < current score(less similar)
+            delta = current_score - new_score # always accept where new score < current score (less similar)
             p_accept = min(1, math.exp(delta / T))
-            if random.random() <= p_accept:
+            if (not temp and new_score < current_score) or (temp and random.random() <= p_accept):
                 current_prefix, current_prompt, current_score = candidate_prefix , new_prompt, new_score
                 best_prefix, best_score, best_idx = current_prefix, current_score, doc_list_idx
             T *= T_decay

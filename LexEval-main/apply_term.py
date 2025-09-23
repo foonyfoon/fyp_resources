@@ -36,11 +36,7 @@ strategy_path = "para-prefix"
 # ###########################
 missing_tree_path = []
 gen_modelIds = constants.MODELS
-VALID_TERMS = ['question_position_suffix', 'question_position_middle',
-                'sg_dialect',
-                'prefix', 'para-prefix', 'para',
-                'question_position_suffix;sg_dialect', 'question_position_middle;sg_dialect',
-                ]
+VALID_TERMS = {'question_position_suffix;sg_dialect', 'question_position_middle;sg_dialect'}
 
 def get_term_perturb(term_type: str) -> list:
     if term_type == "sg_dialect":

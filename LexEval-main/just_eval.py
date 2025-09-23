@@ -5,23 +5,17 @@ from adapters.OAI_Embeddings import RobertaEmbedder
 import utils.constants as constants
 import argparse
 
-dataset_name = "POPQA"
+dataset_name = "TQA"
 strategy_path = "para-prefix"
 start_idx = 0
 end_idx = 500
 
 gen_modelIds = [
-    "mistralai/Mistral-7B-Instruct-v0.2",
-    "google/gemma-3-12b-it",
     "google/gemma-3-1b-it",
 ]
 
 VALID_TERMS = {
-    'sg_dialect',
-    'question_position_suffix;sg_dialect',
-    'question_position_suffix',
-    'question_position_middle',
-    'question_position_middle;sg_dialect'
+    'question_position_middle;sg_dialect',
 }
 
 missing_tree_path = []
@@ -54,32 +48,30 @@ def get_generator(modelId: str) -> LLMAdapter:
 
 
 def eval_trees():
-    tree_ids = []
-    inter_dir = f"{constants.TREE_DIR}{dataset_name}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/tree/"
-    for filename in os.listdir(inter_dir):
-        if filename.endswith(".pkl"):
-            tree_ids.append(int(filename[: -len(".pkl")]))
-    tree_ids.sort()  # Sort the list in ascending order
-    tree_ids = tree_ids[start_idx:end_idx]
+
 
     embedder = RobertaEmbedder()
 
     for gen_modelId in gen_modelIds:
+        tree_ids = []
+        inter_dir = f"{constants.TREE_DIR}{dataset_name}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/"
+        for filename in os.listdir(inter_dir):
+            if filename.endswith("_checked.pkl"):
+                tree_ids.append(int(filename[: -len("_checked.pkl")]))
+        tree_ids.sort()  # Sort the list in ascending order
+        tree_ids = tree_ids[start_idx:end_idx]
         with get_generator(gen_modelId) as generator:
             print(type(generator))
             device = generator.device
             # read dataset
             for tree_id in tree_ids:
+                print(f"gen_modelId={gen_modelId},  tree_id={tree_id}")
                 final_path = f"{constants.TREE_DIR}{dataset_name}_treenodes/{strategy_path}/gemma3-12b_perturb/3_2_0/{gen_modelId.replace('/', '-')}/complete/{tree_id}_checked.pkl"
                 try:
                     full_tree = Tree.load_tree(device, final_path, embedder=embedder, generator=generator, eval='eval')
                 except FileNotFoundError as e:
-                    try:
-                        inter_path = f"{inter_dir}{tree_id}.pkl"
-                        full_tree = Tree.load_tree(device, inter_path, embedder=embedder, generator=generator, eval='eval')
-                    except Exception as e:
-                        print(e)
-                        continue
+                    print(e)
+                    continue
                 # process final tree
                 process_tree(full_tree, tree_id, gen_modelId)
                 try:

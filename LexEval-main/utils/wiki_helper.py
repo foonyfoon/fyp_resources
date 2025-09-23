@@ -54,26 +54,27 @@ class WikiHelper:
 
         return wiki_data
 
-    def fetch_wiki_page_with_retry(self, page_title: str, max_retries=3, base_delay=1, max_delay=8):
+    def fetch_wiki_page_with_retry(self, page_title: str, max_retries=3, base_delay=1, max_delay=8, from_db=True):
         """
         Attempts to fetch a Wikipedia page for the given title with retry logic.
         If a DisambiguationError or PageError occurs, returns None immediately.
         For other exceptions, retries with exponential backoff and jitter.
         """
-        article = get_article_by_title(page_title)
-        if article:
-            # If the article is found in the cache, return it
-            # Convert the binary data back to a numpy array
-            embedding_vector = np.frombuffer(article.embedding, dtype=np.float32)
-            return {
-                "title": article.title,
-                "content": article.content[:4000],
-                "summary": article.summary,
-                "url": article.url,
-                "context": article.context,
-                "links": article.links,
-                "embedding": embedding_vector
-            }
+        if from_db:
+            article = get_article_by_title(page_title)
+            if article:
+                # If the article is found in the cache, return it
+                # Convert the binary data back to a numpy array
+                embedding_vector = np.frombuffer(article.embedding, dtype=np.float32)
+                return {
+                    "title": article.title,
+                    "content": article.content[:4000],
+                    "summary": article.summary,
+                    "url": article.url,
+                    "context": article.context,
+                    "links": article.links,
+                    "embedding": embedding_vector
+                }
         else:
             attempt = 0
             while True:

@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import concurrent.futures
 import torch
 import wikipedia
+import textwrap
 
 from collections import deque
 from typing import List, Union
@@ -25,34 +26,57 @@ class RootNode:
         self.children.append(node)
     
     def visualize(self):
-        # Initialize a directed graph
         G = nx.DiGraph()
 
-        # Recursive function to traverse nodes and add them to the graph
         def add_node_edges(node, parent_label=None):
-            # Create a label based on the type of node
             if isinstance(node, RootNode):
                 node_label = f"Root: {node.title}"
             else:
                 node_label = f"Page: {node.title}"
-            
+
             G.add_node(node_label)
-            
+
             if parent_label:
                 G.add_edge(parent_label, node_label)
-            
-            # Recursively process all children
+
             for child in node.children:
                 add_node_edges(child, node_label)
 
-        # Start building the graph from the root
-        add_node_edges(self)
+        # Allow single root or list of roots
+        if isinstance(self, list):
+            for root in self:
+                add_node_edges(root)
+        else:
+            add_node_edges(self)
 
-        # Draw the graph using a spring layout
-        pos = nx.spring_layout(G)
-        plt.figure(figsize=(8, 6))
-        nx.draw(G, pos, with_labels=True, node_color='lightblue', arrows=True, node_size=800, font_size=5)
-        plt.title("Graph Visualization Using NetworkX")
+        pos = nx.drawing.nx_agraph.graphviz_layout(G, prog='dot')
+
+        # Color root nodes yellow, others lightblue
+        node_colors = ['yellow' if node.startswith("Root:") else 'lightblue' for node in G.nodes()]
+
+        def wrap_label(label, width=20):
+            return "\n".join(textwrap.wrap(label, width))
+        labels = {node: wrap_label(node) for node in G.nodes()}
+
+        plt.figure(figsize=(14, 6))
+        nx.draw(
+            G,
+            pos,
+            with_labels=True,
+            labels=labels,
+            node_color=node_colors,
+            node_size=1500,
+            font_size=14,
+            edge_color='gray',
+            arrows=True,
+            arrowsize=10
+        )
+        
+        # If multiple roots, make a collective title
+        graph_title = ', '.join(r.title for r in self) if isinstance(self, list) else self.title
+        plt.title(f"Knowledge Graph Visualization of {graph_title}", fontsize=14)
+        plt.axis('off')
+        plt.tight_layout()
         plt.show()
    
 class PageNode:
@@ -73,10 +97,13 @@ class KnowledgeGraph:
     '''
     each knowledge graph is created per root prompt and stored there
     '''
-    def __init__(self, entity: str, cr_model, **kwargs):
+    def __init__(self, entity: str, cr_model, skip_cr = False, cache_res=True, **kwargs):
         prompt: str = kwargs.get("prompt")
         k_hop, top_k = 2, 3
-        self.cr = cr_model
+        if not skip_cr:
+            self.cr = cr_model
+        self.skip_cr = skip_cr
+        self.cache_res = cache_res
         self.embedder = kwargs.get("embedder")
         self.wiki_helper = WikiHelper(self.embedder)
         self.graph = self.create_graph(entity, k_hop, top_k)
@@ -125,7 +152,10 @@ class KnowledgeGraph:
         Then return top_k sentences ranked by TF-IDF relevance.
         """
         # Step 1: Coreference resolution
-        resolved_corpus = self.cr.apply_coref_resolution(corpus)
+        if not self.skip_cr:
+            resolved_corpus = self.cr.apply_coref_resolution(corpus)
+        else:
+            resolved_corpus = corpus
         # Step 2: Sentence ranking via TF-IDF
         sentences = self.rank_sentences_by_tfidf(resolved_corpus)
         top_k_ret = min(len(sentences), top_k)
@@ -148,9 +178,9 @@ class KnowledgeGraph:
         queue = deque()
         
         # 2. Fetch the Wikipedia page for the start entities
-        for start_ent in start_entity:   
+        for start_ent in start_entity:
             wiki_page = get_exact_page_from_entity(start_ent)
-            
+    
             node = PageNode(wiki_page.title,
                             wiki_page.summary,
                             wiki_page.content,
@@ -193,7 +223,7 @@ class KnowledgeGraph:
                 top_indices = sorted_indices[:min(len(valid_links), top_k)]  # Use valid_links length here
                 top_links = [valid_links[i] for i in top_indices] # Use valid_links length here
                 with concurrent.futures.ThreadPoolExecutor() as executor:
-                    futures = {executor.submit(self.wiki_helper.fetch_wiki_page_with_retry, link): link for link in top_links}
+                    futures = {executor.submit(self.wiki_helper.fetch_wiki_page_with_retry, link, from_db=False): link for link in top_links}
                     for future in concurrent.futures.as_completed(futures):
                         child_page = future.result()
                         if not child_page:
